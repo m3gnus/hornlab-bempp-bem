@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hornlab-bempp-bem"
+version = "0.1.0"
+description = "Cross-platform bempp-cl acoustic BEM solver for HornLab"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "bempp-cl>=0.4,<0.5",
+    "meshio",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: validation tests that run a real BEM solve",
+]
