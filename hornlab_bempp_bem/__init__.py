@@ -24,6 +24,7 @@ from .config import (
     ObservationConfig,
     SolveConfig,
     VelocityMode,
+    reject_unsupported_native_symmetry,
 )
 from .device import OpenCLError, configure_opencl
 from .mesh import LoadedMesh, MeshError, load_mesh
@@ -115,6 +116,8 @@ def solve(
     if config is None:
         config = SolveConfig()
 
+    reject_unsupported_native_symmetry(config)
+
     loaded = _resolve_mesh(mesh, scale=config.mesh_scale)
     frame = _resolve_frame(loaded, config)
 
@@ -149,6 +152,8 @@ def solve_frequencies(
     """
     if config is None:
         config = SolveConfig()
+
+    reject_unsupported_native_symmetry(config)
 
     loaded = _resolve_mesh(mesh, scale=config.mesh_scale)
     frame = _resolve_frame(loaded, config)

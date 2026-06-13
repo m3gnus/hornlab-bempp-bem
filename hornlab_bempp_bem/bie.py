@@ -13,7 +13,13 @@ from numpy.typing import NDArray
 
 from ._constants import REFERENCE_PRESSURE, SPEED_OF_SOUND
 from .backends import resolve_assembly_backend
-from .config import BIEFormulation, LinearSolver, SolveConfig, VelocityMode
+from .config import (
+    BIEFormulation,
+    LinearSolver,
+    SolveConfig,
+    VelocityMode,
+    reject_unsupported_native_symmetry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -436,6 +442,8 @@ def solve_single_frequency(
     ``_assemble_and_solve_impedance``, which folds the Robin BC
     ∂p/∂n = i·k·β·p directly into the BIE for a single LU solve.
     """
+    reject_unsupported_native_symmetry(config)
+
     t0 = time.time()
 
     if p1_space is None or dp0_space is None:

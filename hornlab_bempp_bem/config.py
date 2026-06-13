@@ -120,3 +120,15 @@ class SolveConfig:
             raise ValueError(
                 "native_symmetry_plane must be None, 'yz', 'xz', 'xy', or 'yz+xz'"
             )
+
+
+def reject_unsupported_native_symmetry(config: SolveConfig) -> None:
+    """Reject reduced-domain symmetry flags that Bempp assembly does not honor."""
+    if config.native_symmetry_plane is None:
+        return
+    raise NotImplementedError(
+        "hornlab-bempp-bem accepts native_symmetry_plane for config compatibility, "
+        "but Bempp assembly does not mirror reduced meshes. Use a full free-space "
+        "mesh, or solve with hornlab-metal-bem and "
+        f"native_symmetry_plane={config.native_symmetry_plane!r}."
+    )
