@@ -12,9 +12,9 @@ classifiers = [
     "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
 ]
 dependencies = [
-    "numpy",
+    "numpy>=1.21",
     "bempp-cl>=0.4,<0.5",
-    "meshio",
+    "meshio>=5.0",
 ]
 
 [project.optional-dependencies]
