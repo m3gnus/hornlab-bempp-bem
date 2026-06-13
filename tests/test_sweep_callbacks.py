@@ -45,6 +45,7 @@ def _fake_frequency_result(freq_hz: float):
     fr = MagicMock()
     fr.frequency_hz = freq_hz
     fr.iterations = 10
+    fr.converged = True
     fr.timing_s = 0.5
     fr.impedance = 400.0 + 50j
     fr.pressure_on_surface = MagicMock()
@@ -131,9 +132,11 @@ class TestEarlyStopping:
         patches = _standard_sweep_patches()
         stop_after = 2
         call_count = [0]
+        callback_logs = []
 
         def stopper(freq_idx, freq_hz, log_entry):
             call_count[0] += 1
+            callback_logs.append(log_entry)
             return freq_idx < stop_after - 1
 
         config = SolveConfig(
@@ -150,6 +153,8 @@ class TestEarlyStopping:
 
         assert len(result.frequencies_hz) == 2
         assert call_count[0] == 2
+        assert all(log["converged"] is True for log in callback_logs)
+        assert all(log["converged"] is True for log in result.solver_log)
         np.testing.assert_allclose(result.frequencies_hz, [500.0, 1000.0])
 
     def test_no_early_stop_all_frequencies_solved(self):

@@ -134,6 +134,7 @@ def run_sweep_serial(
         log_entry = {
             "frequency_hz": fr.frequency_hz,
             "iterations": fr.iterations,
+            "converged": fr.converged,
             "timing_s": fr.timing_s,
             "impedance": fr.impedance,
         }
@@ -205,6 +206,7 @@ def run_sweep_serial(
         {
             "frequency_hz": fr.frequency_hz,
             "iterations": fr.iterations,
+            "converged": fr.converged,
             "timing_s": fr.timing_s,
         }
         for fr in freq_results
@@ -368,6 +370,7 @@ def _worker_solve_chunk(
         log_entries.append({
             "frequency_hz": fr.frequency_hz,
             "iterations": fr.iterations,
+            "converged": fr.converged,
             "timing_s": fr.timing_s,
         })
 

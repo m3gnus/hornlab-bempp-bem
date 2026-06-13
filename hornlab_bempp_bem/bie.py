@@ -38,6 +38,7 @@ class FrequencyResult:
     neumann_data: object              # bempp GridFunction (DP0)
     impedance: complex
     iterations: int | None
+    converged: bool
     timing_s: float
 
 
@@ -254,7 +255,7 @@ def _assemble_and_solve_impedance(
         dp0_space, coefficients=neumann_total,
     )
 
-    return p_surface, neumann_fun, None  # iterations = None (direct solve)
+    return p_surface, neumann_fun, None, True  # iterations = None (direct solve)
 
 
 def _assemble_and_solve(
@@ -303,6 +304,7 @@ def _assemble_and_solve(
 
     solver_choice = _choose_solver(config, n_triangles)
     iterations = None
+    converged = True
 
     if solver_choice is LinearSolver.LU:
         p_surface = bempp_api.linalg.lu(lhs, rhs)
@@ -315,12 +317,13 @@ def _assemble_and_solve(
             return_iteration_count=True,
         )
         p_surface, info, iterations = result
+        converged = info == 0
         if info != 0:
             logger.warning(
                 "GMRES did not converge (info=%d) at k=%.4f", info, k_real,
             )
 
-    return p_surface, iterations
+    return p_surface, iterations, converged
 
 
 def _evaluate_far_field(
@@ -488,7 +491,7 @@ def solve_single_frequency(
             **{k_: getattr(config, k_) for k_ in config.__dataclass_fields__},
             "impedance_sources": active_impedance,
         })
-        p_surface, neumann_fun, iterations = _assemble_and_solve_impedance(
+        p_surface, neumann_fun, iterations, converged = _assemble_and_solve_impedance(
             grid, p1_space, dp0_space, physical_tags,
             k, omega, impedance_config, op_kwargs_low,
         )
@@ -496,7 +499,7 @@ def solve_single_frequency(
         neumann_fun = _build_neumann_data(
             dp0_space, physical_tags, omega, config, config.precision,
         )
-        p_surface, iterations = _assemble_and_solve(
+        p_surface, iterations, converged = _assemble_and_solve(
             grid, p1_space, dp0_space, neumann_fun,
             k, k_real, config, n_tris, op_kwargs_low, op_kwargs_high,
         )
@@ -525,5 +528,6 @@ def solve_single_frequency(
         neumann_data=neumann_fun,
         impedance=impedance,
         iterations=iterations,
+        converged=converged,
         timing_s=elapsed,
     )
