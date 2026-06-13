@@ -7,6 +7,10 @@ name = "hornlab-bempp-bem"
 version = "0.1.0"
 description = "Cross-platform bempp-cl acoustic BEM solver for HornLab"
 requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+]
 dependencies = [
     "numpy",
     "bempp-cl>=0.4,<0.5",
