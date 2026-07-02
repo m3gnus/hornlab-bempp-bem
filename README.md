@@ -62,6 +62,11 @@ Mesh requirements:
 - triangle winding must be outward for canonical meshes
 - source/radiator tags must match `config.velocity_sources`
 
+With `require_closed_mesh=True` (or `load_mesh(..., require_closed=True)`),
+the surface must additionally be a closed 2-manifold: every edge shared by
+exactly two triangles. Open edges and non-manifold edges are rejected. The
+check also applies to pre-loaded `LoadedMesh` inputs passed to `solve()`.
+
 Use `solve_frequencies(mesh, frequencies_hz, config=None)` when frequency
 order comes from the caller instead of a generated sweep.
 
@@ -79,6 +84,7 @@ Common fields:
 - `observation`, an `ObservationConfig`
 - `mesh_scale`
 - `air_density`
+- `require_closed_mesh`, reject open or non-manifold surfaces before solving
 - `assembly_backend`, one of `"opencl"`, `"numba"`, or `"auto"`
 - `opencl_device`, either `"cpu"` or `"gpu"` when using OpenCL
 - `progress_callback`
