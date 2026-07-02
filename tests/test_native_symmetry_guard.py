@@ -8,6 +8,7 @@ import pytest
 import hornlab_bempp_bem
 from hornlab_bempp_bem.bie import solve_single_frequency
 from hornlab_bempp_bem.config import SolveConfig
+from hornlab_bempp_bem.mesh import MeshError
 
 
 def test_solve_rejects_native_symmetry_before_mesh_load(monkeypatch):
@@ -37,4 +38,35 @@ def test_solve_single_frequency_rejects_native_symmetry_before_assembly():
             np.array([2], dtype=np.int32),
             1000.0,
             SolveConfig(native_symmetry_plane="yz"),
+        )
+
+
+def test_solve_single_frequency_require_closed_mesh_rejects_open_grid():
+    grid = SimpleNamespace(
+        vertices=np.asarray(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        ).T,
+        elements=np.asarray(
+            [
+                [0, 2, 1],
+                [0, 1, 3],
+                [0, 3, 2],
+            ],
+            dtype=np.int32,
+        ).T,
+        number_of_elements=3,
+    )
+
+    with pytest.raises(MeshError, match="open boundary edges"):
+        solve_single_frequency(
+            grid,
+            np.array([1, 1, 2], dtype=np.int32),
+            1000.0,
+            SolveConfig(require_closed_mesh=True),
         )

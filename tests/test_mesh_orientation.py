@@ -128,7 +128,7 @@ def test_reduced_mesh_warning_points_to_metal_backend():
         _warn_if_reduced_symmetry_mesh(verts, tris)
 
 
-def _tet_msh_text(*, drop_wall_face: bool) -> str:
+def _tet_msh_text(*, drop_wall_face: bool, duplicate_wall_face: bool = False) -> str:
     # 1-based faces of the outward tetrahedron; face 4 carries source tag 2.
     faces = [
         ("1 3 2", 1),
@@ -138,6 +138,8 @@ def _tet_msh_text(*, drop_wall_face: bool) -> str:
     ]
     if drop_wall_face:
         faces = faces[:1] + faces[2:]
+    if duplicate_wall_face:
+        faces.append(faces[0])
     lines = [
         "$MeshFormat",
         "2.2 0 8",
@@ -159,7 +161,7 @@ def _tet_msh_text(*, drop_wall_face: bool) -> str:
 
 
 def test_load_mesh_require_closed(tmp_path):
-    from hornlab_bempp_bem.mesh import load_mesh
+    from hornlab_bempp_bem.mesh import _require_closed_surface, load_mesh
 
     closed = tmp_path / "tet.msh"
     closed.write_text(_tet_msh_text(drop_wall_face=False))
@@ -171,6 +173,16 @@ def test_load_mesh_require_closed(tmp_path):
         load_mesh(leaking, require_closed=True)
     with pytest.raises(MeshError, match="open boundary edges"):
         load_mesh(leaking, validate=False, require_closed=True)
+
+    verts, tris = _tetrahedron()
+    duplicated = np.vstack([tris, tris[0:1]])
+    with pytest.raises(MeshError, match="non-manifold"):
+        _require_closed_surface(verts, duplicated)
+
+    nonmanifold = tmp_path / "tet-duplicate-face.msh"
+    nonmanifold.write_text(_tet_msh_text(drop_wall_face=False, duplicate_wall_face=True))
+    with pytest.raises(MeshError, match="non-manifold"):
+        load_mesh(nonmanifold, require_closed=True)
 
 
 def test_resolve_loaded_mesh_require_closed_rechecks_boundaries():
@@ -190,3 +202,17 @@ def test_resolve_loaded_mesh_require_closed_rechecks_boundaries():
     assert _resolve_mesh(loaded, require_closed=False) is loaded
     with pytest.raises(MeshError, match="open boundary edges"):
         _resolve_mesh(loaded, require_closed=True)
+
+    duplicated = np.vstack([tris, tris[0:1]])
+    loaded_nonmanifold = LoadedMesh(
+        grid=SimpleNamespace(vertices=verts.T, elements=duplicated.T),
+        physical_tags=np.ones(duplicated.shape[0], dtype=np.int32),
+        info=MeshInfo(
+            n_vertices=len(verts),
+            n_triangles=len(duplicated),
+            physical_groups={1: "wall"},
+            bounding_box_m=(verts.min(axis=0), verts.max(axis=0)),
+        ),
+    )
+    with pytest.raises(MeshError, match="non-manifold"):
+        _resolve_mesh(loaded_nonmanifold, require_closed=True)

@@ -82,7 +82,7 @@ def load_mesh(
 
     if require_closed:
         _require_closed_surface(verts, triangles)
-    else:
+    elif validate:
         _warn_if_reduced_symmetry_mesh(verts, triangles)
 
     if validate:
@@ -218,15 +218,27 @@ def open_boundary_edges(
     open rim on the cut plane(s). Ported from hornlab-metal-bem so both
     solvers share the canonical-mesh closure contract.
     """
+    unique_edges, counts = _edge_incidence_counts(triangles_nx3)
+    if unique_edges.size == 0:
+        return np.empty((0, 2), dtype=np.int32)
+    return np.ascontiguousarray(unique_edges[counts == 1], dtype=np.int32)
+
+
+def _edge_incidence_counts(
+    triangles_nx3: NDArray[np.int32],
+) -> tuple[NDArray[np.int32], NDArray[np.int64]]:
     tris = np.asarray(triangles_nx3)
     if tris.size == 0:
-        return np.empty((0, 2), dtype=np.int32)
+        return np.empty((0, 2), dtype=np.int32), np.empty((0,), dtype=np.int64)
     edges = np.sort(
         np.concatenate((tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]])),
         axis=1,
     )
     unique_edges, counts = np.unique(edges, axis=0, return_counts=True)
-    return np.ascontiguousarray(unique_edges[counts == 1], dtype=np.int32)
+    return (
+        np.ascontiguousarray(unique_edges, dtype=np.int32),
+        np.ascontiguousarray(counts, dtype=np.int64),
+    )
 
 
 def _require_closed_surface(
@@ -235,19 +247,26 @@ def _require_closed_surface(
 ) -> None:
     """Raise when a closed-mode caller gives this backend an open surface."""
     verts = np.asarray(vertices_nx3, dtype=np.float64)
-    triangles = np.asarray(triangles_nx3, dtype=np.int32)
-    boundary = open_boundary_edges(triangles)
-    if not boundary.size:
+    edges, counts = _edge_incidence_counts(np.asarray(triangles_nx3, dtype=np.int32))
+    bad = counts != 2
+    if not np.any(bad):
         return
-    # A closed-mode mesh (enclosure / capped free-standing box) with open
-    # boundary edges is a leaking model: this backend has no symmetry support,
-    # so unlike hornlab-metal-bem's cut-plane guard there is no legitimate
-    # reason for open edges here.
-    example = verts[boundary[0]].round(6).tolist()
+    bad_edges = edges[bad]
+    open_count = int(np.count_nonzero(counts == 1))
+    nonmanifold_count = int(np.count_nonzero(counts > 2))
+    parts: list[str] = []
+    if open_count:
+        parts.append(f"{open_count} open boundary edges")
+    if nonmanifold_count:
+        parts.append(f"{nonmanifold_count} non-manifold edges")
+    if not parts:
+        parts.append(f"{bad_edges.shape[0]} invalid edges")
+    example = verts[bad_edges[0]].round(6).tolist()
     raise MeshError(
-        f"Mesh has {boundary.shape[0]} open boundary edges but the caller "
-        "requires a closed surface (require_closed=True). Example open edge "
-        f"between vertices {example}. The box is leaking — regenerate the mesh."
+        f"Mesh has {' and '.join(parts)} but the caller requires a closed "
+        f"2-manifold surface (require_closed=True). Example invalid edge "
+        f"between vertices {example}. The box is leaking or non-manifold — "
+        "regenerate the mesh."
     )
 
 

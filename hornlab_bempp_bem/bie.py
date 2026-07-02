@@ -20,6 +20,7 @@ from .config import (
     VelocityMode,
     reject_unsupported_native_symmetry,
 )
+from .mesh import _require_closed_surface
 
 logger = logging.getLogger(__name__)
 
@@ -449,6 +450,11 @@ def solve_single_frequency(
     ∂p/∂n = i·k·β·p directly into the BIE for a single LU solve.
     """
     reject_unsupported_native_symmetry(config)
+    if config.require_closed_mesh:
+        _require_closed_surface(
+            np.asarray(grid.vertices, dtype=np.float64).T,
+            np.asarray(grid.elements, dtype=np.int32).T,
+        )
 
     t0 = time.time()
 
