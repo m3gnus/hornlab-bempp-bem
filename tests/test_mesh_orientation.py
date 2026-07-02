@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
+from hornlab_bempp_bem import _resolve_mesh
 from hornlab_bempp_bem.mesh import (
+    LoadedMesh,
     MeshError,
     _signed_mesh_volume_indicator,
     _validate_outward_normals,
 )
+from hornlab_bempp_bem.result import MeshInfo
 
 
 def _tetrahedron() -> tuple[np.ndarray, np.ndarray]:
@@ -164,3 +169,24 @@ def test_load_mesh_require_closed(tmp_path):
     leaking.write_text(_tet_msh_text(drop_wall_face=True))
     with pytest.raises(MeshError, match="open boundary edges"):
         load_mesh(leaking, require_closed=True)
+    with pytest.raises(MeshError, match="open boundary edges"):
+        load_mesh(leaking, validate=False, require_closed=True)
+
+
+def test_resolve_loaded_mesh_require_closed_rechecks_boundaries():
+    verts, tris = _tetrahedron()
+    open_tris = tris[:-1].copy()
+    loaded = LoadedMesh(
+        grid=SimpleNamespace(vertices=verts.T, elements=open_tris.T),
+        physical_tags=np.ones(open_tris.shape[0], dtype=np.int32),
+        info=MeshInfo(
+            n_vertices=len(verts),
+            n_triangles=len(open_tris),
+            physical_groups={1: "wall"},
+            bounding_box_m=(verts.min(axis=0), verts.max(axis=0)),
+        ),
+    )
+
+    assert _resolve_mesh(loaded, require_closed=False) is loaded
+    with pytest.raises(MeshError, match="open boundary edges"):
+        _resolve_mesh(loaded, require_closed=True)

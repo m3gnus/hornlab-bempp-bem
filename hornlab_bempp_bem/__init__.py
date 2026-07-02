@@ -27,7 +27,7 @@ from .config import (
     reject_unsupported_native_symmetry,
 )
 from .device import OpenCLError, configure_opencl
-from .mesh import LoadedMesh, MeshError, load_mesh
+from .mesh import LoadedMesh, MeshError, _require_closed_surface, load_mesh
 from .observation import ObservationFrame, infer_frame
 from .result import MeshInfo, SolveResult
 
@@ -70,6 +70,11 @@ def _resolve_mesh(
 ) -> LoadedMesh:
     """Accept str, Path, or LoadedMesh."""
     if isinstance(mesh, LoadedMesh):
+        if require_closed:
+            _require_closed_surface(
+                np.asarray(mesh.grid.vertices, dtype=np.float64).T,
+                np.asarray(mesh.grid.elements, dtype=np.int32).T,
+            )
         return mesh
     return load_mesh(mesh, scale=scale, require_closed=require_closed)
 

@@ -103,7 +103,7 @@ class SolveConfig:
     # edges). Set by callers solving closed-mode geometries (enclosure /
     # capped free-standing box): this backend has no symmetry support, so a
     # closed-mode mesh with open edges is a leaking model that would solve
-    # silently wrong. Ignored for pre-loaded LoadedMesh inputs.
+    # silently wrong. Also checked for pre-loaded LoadedMesh inputs.
     require_closed_mesh: bool = False
 
     # Air density (kg/m^3). Default 1.2041 matches standard air at 20 C.

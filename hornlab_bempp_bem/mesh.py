@@ -80,6 +80,11 @@ def load_mesh(
         triangles = triangles[valid]
         phys_tags = phys_tags[valid]
 
+    if require_closed:
+        _require_closed_surface(verts, triangles)
+    else:
+        _warn_if_reduced_symmetry_mesh(verts, triangles)
+
     if validate:
         _validate_outward_normals(
             verts,
@@ -87,23 +92,6 @@ def load_mesh(
             repair=repair_normals,
         )
         _validate_physical_groups(phys_tags)
-        boundary = open_boundary_edges(triangles)
-        if boundary.size:
-            if require_closed:
-                # A closed-mode mesh (enclosure / capped free-standing box)
-                # with open boundary edges is a leaking model: this backend
-                # has no symmetry support, so unlike hornlab-metal-bem's
-                # cut-plane guard there is no legitimate reason for open
-                # edges here — the solve would run and produce silently
-                # wrong physics.
-                example = verts[boundary[0]].round(6).tolist()
-                raise MeshError(
-                    f"Mesh has {boundary.shape[0]} open boundary edges but the "
-                    "caller requires a closed surface (require_closed=True). "
-                    f"Example open edge between vertices {example}. The box is "
-                    "leaking — regenerate the mesh."
-                )
-            _warn_if_reduced_symmetry_mesh(verts, triangles)
 
     grid = bempp_api.Grid(verts.T, triangles.T.astype(np.int32), phys_tags)
 
@@ -239,6 +227,28 @@ def open_boundary_edges(
     )
     unique_edges, counts = np.unique(edges, axis=0, return_counts=True)
     return np.ascontiguousarray(unique_edges[counts == 1], dtype=np.int32)
+
+
+def _require_closed_surface(
+    vertices_nx3: NDArray[np.float64],
+    triangles_nx3: NDArray[np.int32],
+) -> None:
+    """Raise when a closed-mode caller gives this backend an open surface."""
+    verts = np.asarray(vertices_nx3, dtype=np.float64)
+    triangles = np.asarray(triangles_nx3, dtype=np.int32)
+    boundary = open_boundary_edges(triangles)
+    if not boundary.size:
+        return
+    # A closed-mode mesh (enclosure / capped free-standing box) with open
+    # boundary edges is a leaking model: this backend has no symmetry support,
+    # so unlike hornlab-metal-bem's cut-plane guard there is no legitimate
+    # reason for open edges here.
+    example = verts[boundary[0]].round(6).tolist()
+    raise MeshError(
+        f"Mesh has {boundary.shape[0]} open boundary edges but the caller "
+        "requires a closed surface (require_closed=True). Example open edge "
+        f"between vertices {example}. The box is leaking — regenerate the mesh."
+    )
 
 
 def detect_reduced_symmetry_plane(
