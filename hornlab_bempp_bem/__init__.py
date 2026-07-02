@@ -65,11 +65,13 @@ def _detect_worker_count() -> int:
     return max(1, count)
 
 
-def _resolve_mesh(mesh, scale: float = 1.0) -> LoadedMesh:
+def _resolve_mesh(
+    mesh, scale: float = 1.0, require_closed: bool = False
+) -> LoadedMesh:
     """Accept str, Path, or LoadedMesh."""
     if isinstance(mesh, LoadedMesh):
         return mesh
-    return load_mesh(mesh, scale=scale)
+    return load_mesh(mesh, scale=scale, require_closed=require_closed)
 
 
 def _resolve_frame(loaded: LoadedMesh, config: SolveConfig) -> ObservationFrame:
@@ -118,7 +120,9 @@ def solve(
 
     reject_unsupported_native_symmetry(config)
 
-    loaded = _resolve_mesh(mesh, scale=config.mesh_scale)
+    loaded = _resolve_mesh(
+        mesh, scale=config.mesh_scale, require_closed=config.require_closed_mesh
+    )
     frame = _resolve_frame(loaded, config)
 
     from .sweep import (
@@ -155,7 +159,9 @@ def solve_frequencies(
 
     reject_unsupported_native_symmetry(config)
 
-    loaded = _resolve_mesh(mesh, scale=config.mesh_scale)
+    loaded = _resolve_mesh(
+        mesh, scale=config.mesh_scale, require_closed=config.require_closed_mesh
+    )
     frame = _resolve_frame(loaded, config)
 
     from .sweep import run_sweep_serial

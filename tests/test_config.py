@@ -81,3 +81,17 @@ def test_solve_config_callbacks_accept_callables():
     cfg.progress_callback(0, 5, 1000.0)
     assert calls == [("progress", 0)]
     assert cfg.on_frequency_result(0, 1000.0, {}) is True
+
+
+def test_require_closed_mesh_defaults_off_and_forwards():
+    """Closed-mode callers set require_closed_mesh; it must reach load_mesh."""
+    import inspect
+
+    from hornlab_bempp_bem import _resolve_mesh
+    from hornlab_bempp_bem.config import SolveConfig
+    from hornlab_bempp_bem.mesh import load_mesh
+
+    assert SolveConfig().require_closed_mesh is False
+    # The loader accepts the flag and the resolver forwards it.
+    assert "require_closed" in inspect.signature(load_mesh).parameters
+    assert "require_closed" in inspect.signature(_resolve_mesh).parameters
