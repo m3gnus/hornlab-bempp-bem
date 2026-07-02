@@ -250,7 +250,10 @@ def _assemble_and_solve_impedance(
     # n_total = g_drv + i·k·β·p_dp0
     p_dp0 = M_proj @ p_coeffs                          # (n_dp0,)
     g_robin = (1j * k) * beta_vec * p_dp0              # (n_dp0,)
-    neumann_total = (g_drv + g_robin).astype(np.complex64)
+    # The Robin direct solve runs in complex128; only downcast the true
+    # Neumann data when the configured precision asks for it.
+    neumann_dtype = np.complex64 if config.precision == "single" else np.complex128
+    neumann_total = (g_drv + g_robin).astype(neumann_dtype)
     neumann_fun = bempp_api.GridFunction(
         dp0_space, coefficients=neumann_total,
     )

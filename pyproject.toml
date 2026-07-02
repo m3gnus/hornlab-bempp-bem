@@ -15,6 +15,9 @@ dependencies = [
     "numpy>=1.21",
     "bempp-cl>=0.4,<0.5",
     "meshio>=5.0",
+    # bie.py calls scipy.linalg directly; until now scipy only arrived
+    # transitively via bempp-cl.
+    "scipy>=1.7",
 ]
 
 [project.optional-dependencies]

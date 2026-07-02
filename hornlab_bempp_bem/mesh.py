@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,10 @@ from numpy.typing import NDArray
 from .result import MeshInfo
 
 logger = logging.getLogger(__name__)
+
+# Matches hornlab-metal-bem's cut-plane snap tolerance so both solvers agree
+# on what counts as "on a symmetry plane".
+_SYMMETRY_SNAP_TOLERANCE = 1.0e-6
 
 
 @dataclass
@@ -29,6 +34,7 @@ def load_mesh(
     validate: bool = True,
     merge_tol: float = 1e-9,
     repair_normals: bool = False,
+    require_closed: bool = False,
 ) -> LoadedMesh:
     """Load a .msh file into a bempp Grid with physical group tags.
 
@@ -81,6 +87,23 @@ def load_mesh(
             repair=repair_normals,
         )
         _validate_physical_groups(phys_tags)
+        boundary = open_boundary_edges(triangles)
+        if boundary.size:
+            if require_closed:
+                # A closed-mode mesh (enclosure / capped free-standing box)
+                # with open boundary edges is a leaking model: this backend
+                # has no symmetry support, so unlike hornlab-metal-bem's
+                # cut-plane guard there is no legitimate reason for open
+                # edges here — the solve would run and produce silently
+                # wrong physics.
+                example = verts[boundary[0]].round(6).tolist()
+                raise MeshError(
+                    f"Mesh has {boundary.shape[0]} open boundary edges but the "
+                    "caller requires a closed surface (require_closed=True). "
+                    f"Example open edge between vertices {example}. The box is "
+                    "leaking — regenerate the mesh."
+                )
+            _warn_if_reduced_symmetry_mesh(verts, triangles)
 
     grid = bempp_api.Grid(verts.T, triangles.T.astype(np.int32), phys_tags)
 
@@ -196,3 +219,138 @@ def _validate_physical_groups(phys_tags: NDArray[np.int32]) -> None:
         )
     if not np.any(unique == 1):
         logger.warning("No rigid wall (tag 1) in mesh")
+
+
+def open_boundary_edges(
+    triangles_nx3: NDArray[np.int32],
+) -> NDArray[np.int32]:
+    """Return ``(n, 2)`` sorted vertex pairs for edges used by exactly one triangle.
+
+    A closed surface has no open boundary edges; a mirror-reduced mesh has its
+    open rim on the cut plane(s). Ported from hornlab-metal-bem so both
+    solvers share the canonical-mesh closure contract.
+    """
+    tris = np.asarray(triangles_nx3)
+    if tris.size == 0:
+        return np.empty((0, 2), dtype=np.int32)
+    edges = np.sort(
+        np.concatenate((tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]])),
+        axis=1,
+    )
+    unique_edges, counts = np.unique(edges, axis=0, return_counts=True)
+    return np.ascontiguousarray(unique_edges[counts == 1], dtype=np.int32)
+
+
+def detect_reduced_symmetry_plane(
+    vertices_nx3: NDArray[np.float64],
+    triangles_nx3: NDArray[np.int32],
+    *,
+    tolerance: float = _SYMMETRY_SNAP_TOLERANCE,
+) -> str | None:
+    """Heuristically detect mirror-reduced meshes (quarter/half models).
+
+    Conservative on purpose: only reports a candidate when the mesh lives on
+    the positive side of a candidate plane, has a meaningful set of used
+    vertices on that plane, and every open boundary edge is explained by the
+    candidate plane set. Ported from hornlab-metal-bem.
+    """
+    vertices = np.asarray(vertices_nx3, dtype=np.float64)
+    triangles = np.asarray(triangles_nx3, dtype=np.int32)
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or triangles.size == 0:
+        return None
+
+    used_vertices = np.unique(triangles.reshape(-1))
+    if used_vertices.size == 0:
+        return None
+
+    boundary_edges = open_boundary_edges(triangles)
+    if boundary_edges.size == 0:
+        return None
+
+    used = vertices[used_vertices]
+    candidates: list[tuple[str, int]] = []
+    for plane, component in (("yz", 0), ("xz", 1), ("xy", 2)):
+        values = used[:, component]
+        on_plane = np.abs(values) <= tolerance
+        has_positive_side = bool(np.max(values) > tolerance)
+        meaningful_count = int(np.count_nonzero(on_plane))
+        if (
+            np.min(values) >= -tolerance
+            and has_positive_side
+            and meaningful_count >= 2
+            and _count_edges_on_plane(vertices, boundary_edges, component, tolerance) >= 2
+        ):
+            candidates.append((plane, component))
+
+    if not candidates:
+        return None
+
+    candidate_components = {plane: component for plane, component in candidates}
+    for plane, component in candidate_components.items():
+        if _all_edges_on_any_plane(vertices, boundary_edges, [component], tolerance):
+            return plane
+    if (
+        "yz" in candidate_components
+        and "xz" in candidate_components
+        and _all_edges_on_any_plane(
+            vertices,
+            boundary_edges,
+            [candidate_components["yz"], candidate_components["xz"]],
+            tolerance,
+        )
+    ):
+        return "yz+xz"
+    return None
+
+
+def _warn_if_reduced_symmetry_mesh(
+    vertices_nx3: NDArray[np.float64],
+    triangles_nx3: NDArray[np.int32],
+) -> None:
+    suspected = detect_reduced_symmetry_plane(vertices_nx3, triangles_nx3)
+    if suspected is None:
+        return
+    warnings.warn(
+        "Mesh looks like a mirror-reduced native-symmetry mesh "
+        f"(suspected plane {suspected!r}), but this backend has no symmetry "
+        "support: it would silently solve the open shell instead of the "
+        "mirrored geometry. Mesh the full domain for bempp, or solve the "
+        f"reduced mesh with hornlab-metal-bem and native_symmetry_plane="
+        f"{suspected!r}. If the rim is a real open boundary (bare horn), "
+        "ignore this warning.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
+def _count_edges_on_plane(
+    vertices: NDArray[np.float64],
+    edges: NDArray[np.int32],
+    component: int,
+    tolerance: float,
+) -> int:
+    return int(
+        np.count_nonzero(_edge_on_plane_mask(vertices, edges, component, tolerance))
+    )
+
+
+def _all_edges_on_any_plane(
+    vertices: NDArray[np.float64],
+    edges: NDArray[np.int32],
+    components: list[int],
+    tolerance: float,
+) -> bool:
+    explained = np.zeros(edges.shape[0], dtype=bool)
+    for component in components:
+        explained |= _edge_on_plane_mask(vertices, edges, component, tolerance)
+    return bool(np.all(explained))
+
+
+def _edge_on_plane_mask(
+    vertices: NDArray[np.float64],
+    edges: NDArray[np.int32],
+    component: int,
+    tolerance: float,
+) -> NDArray[np.bool_]:
+    edge_values = vertices[edges, component]
+    return np.all(np.abs(edge_values) <= tolerance, axis=1)
