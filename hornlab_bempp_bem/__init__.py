@@ -23,6 +23,7 @@ from .config import (
     LinearSolver,
     ObservationConfig,
     SolveConfig,
+    SourceMotion,
     VelocityMode,
     reject_unsupported_native_symmetry,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "BIEFormulation",
     "LinearSolver",
     "VelocityMode",
+    "SourceMotion",
     "LoadedMesh",
     "MeshInfo",
     "MeshError",

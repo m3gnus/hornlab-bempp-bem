@@ -17,6 +17,7 @@ from .config import (
     BIEFormulation,
     LinearSolver,
     SolveConfig,
+    SourceMotion,
     VelocityMode,
     reject_unsupported_native_symmetry,
 )
@@ -84,17 +85,73 @@ def _setup_function_spaces(grid):
     return p1, dp0
 
 
+def _build_axial_element_scale(
+    grid,
+    physical_tags: NDArray[np.int32],
+    source_tags,
+) -> NDArray | None:
+    """Per-element ``n_hat . axis`` projection for a rigid axial (piston) source.
+
+    For each source tag the piston axis is that tag's area-weighted mean outward
+    normal; each of the tag's faces is scaled by the cosine between its outward
+    normal and that axis (1 at the pole, tapering to the rim). A flat disc yields
+    1.0 on every face, so an axial source reduces exactly to the uniform-normal
+    BC there. Non-source faces stay 0.0. Because the axis is the mean of the same
+    outward normals, the projection is naturally outward-positive (matching the
+    normal BC's sign). Bempp solves full-domain meshes only
+    (reject_unsupported_native_symmetry), so no symmetry projection is needed.
+    Mirrors hornlab-metal-bem's _build_axial_face_scale. Returns None when no
+    source face yields a usable axis, so the caller keeps the normal BC.
+    """
+    vertices = np.asarray(grid.vertices.T, dtype=np.float64)
+    elements = np.asarray(grid.elements.T, dtype=np.int32)
+    n_elem = elements.shape[0]
+
+    p0 = vertices[elements[:, 0]]
+    p1 = vertices[elements[:, 1]]
+    p2 = vertices[elements[:, 2]]
+    raw = np.cross(p1 - p0, p2 - p0)  # outward (canonical winding); |raw| = 2*area
+    mags = np.linalg.norm(raw, axis=1)
+
+    scale = np.zeros(n_elem, dtype=np.float64)
+    any_source = False
+    for tag in sorted({int(t) for t in source_tags}):
+        idx = np.where(physical_tags == tag)[0]
+        if idx.size == 0:
+            continue
+        tag_mags = mags[idx]
+        good = tag_mags > 1e-15
+        if not np.any(good):
+            continue
+        axis_vec = raw[idx][good].sum(axis=0)  # area-weighted mean outward normal
+        axis_norm = float(np.linalg.norm(axis_vec))
+        if axis_norm <= 1e-12:
+            scale[idx] = 1.0  # degenerate normals: fall back to uniform normal
+            continue
+        axis = axis_vec / axis_norm
+        safe = np.where(tag_mags > 1e-15, tag_mags, 1.0)
+        unit_normals = raw[idx] / safe[:, None]
+        scale[idx] = unit_normals @ axis
+        any_source = True
+
+    return scale if any_source else None
+
+
 def _build_neumann_data(
     dp0_space,
     physical_tags: NDArray[np.int32],
     omega: float,
     config: SolveConfig,
     precision: str = "single",
+    grid=None,
 ) -> object:
     """Construct Neumann boundary condition: dp/dn = i*rho*omega*v_n.
 
-    Supports multiple velocity source tags with independent weights,
-    and acceleration vs velocity driving modes.
+    Supports multiple velocity source tags with independent weights, and
+    acceleration vs velocity driving modes. When ``config.source_motion ==
+    "axial"`` (and ``grid`` is supplied) each source face is driven at
+    ``weight * (n_hat . axis)`` -- a rigid piston -- instead of a uniform normal
+    velocity; the default "normal" path is unchanged.
     """
     import bempp_cl.api as bempp_api
 
@@ -102,6 +159,11 @@ def _build_neumann_data(
     coeffs = np.zeros(dp0_space.global_dof_count, dtype=dtype)
 
     air_density = config.air_density
+    axial_scale = None
+    if config.source_motion == SourceMotion.AXIAL and grid is not None:
+        axial_scale = _build_axial_element_scale(
+            grid, physical_tags, config.velocity_sources.keys()
+        )
 
     for tag, weight in config.velocity_sources.items():
         mask = physical_tags == tag
@@ -116,7 +178,12 @@ def _build_neumann_data(
         # Neumann data: dp/dn = i * rho * omega * v_n
         g_val = 1j * air_density * omega * v_n
         dofs = np.where(mask)[0]
-        coeffs[dofs] = g_val
+        if axial_scale is not None:
+            # Per-face piston projection scales g_val identically in velocity and
+            # acceleration modes (both carry one factor of v_n).
+            coeffs[dofs] = g_val * axial_scale[dofs]
+        else:
+            coeffs[dofs] = g_val
 
     return bempp_api.GridFunction(dp0_space, coefficients=coeffs)
 
@@ -147,13 +214,23 @@ def _build_driver_neumann_coeffs(
     omega: float,
     config: SolveConfig,
     dtype: type,
+    grid=None,
 ) -> NDArray:
     """Build Neumann coefficients with velocity sources only — zero on
     impedance tags (Robin BCs are folded into the LHS instead).
+
+    Honors ``config.source_motion == "axial"`` (rigid piston) when ``grid`` is
+    supplied, exactly like ``_build_neumann_data``; the default normal path is
+    unchanged.
     """
     coeffs = np.zeros(dp0_space.global_dof_count, dtype=dtype)
     air_density = config.air_density
     impedance_tag_set = set(config.impedance_sources.keys())
+    axial_scale = None
+    if config.source_motion == SourceMotion.AXIAL and grid is not None:
+        axial_scale = _build_axial_element_scale(
+            grid, physical_tags, config.velocity_sources.keys()
+        )
     for tag, weight in config.velocity_sources.items():
         if tag in impedance_tag_set:
             # Don't double-count: impedance tags get their own BC
@@ -165,7 +242,11 @@ def _build_driver_neumann_coeffs(
         if config.velocity_mode is VelocityMode.ACCELERATION:
             v_n = weight / (1j * omega) if omega > 0 else 0.0
         g_val = 1j * air_density * omega * v_n
-        coeffs[np.where(mask)[0]] = g_val
+        dofs = np.where(mask)[0]
+        if axial_scale is not None:
+            coeffs[dofs] = g_val * axial_scale[dofs]
+        else:
+            coeffs[dofs] = g_val
     return coeffs
 
 
@@ -239,7 +320,7 @@ def _assemble_and_solve_impedance(
 
     # RHS = V · g_drv, with g_drv zero on impedance tags
     g_drv = _build_driver_neumann_coeffs(
-        dp0_space, physical_tags, omega, config, dtype_solve,
+        dp0_space, physical_tags, omega, config, dtype_solve, grid=grid,
     )
     rhs_vec = V_mat @ g_drv
 
@@ -506,7 +587,7 @@ def solve_single_frequency(
         )
     else:
         neumann_fun = _build_neumann_data(
-            dp0_space, physical_tags, omega, config, config.precision,
+            dp0_space, physical_tags, omega, config, config.precision, grid=grid,
         )
         p_surface, iterations, converged = _assemble_and_solve(
             grid, p1_space, dp0_space, neumann_fun,

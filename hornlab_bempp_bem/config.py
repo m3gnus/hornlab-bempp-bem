@@ -26,6 +26,21 @@ class VelocityMode(Enum):
     ACCELERATION = "acceleration"
 
 
+class SourceMotion:
+    """How a driven source tag's prescribed velocity maps onto its faces.
+
+    NORMAL (default): each source face vibrates along its own outward normal at
+    the same speed -- a uniformly breathing cap. AXIAL: the source moves as a
+    rigid piston along its axis, so the per-face normal velocity is
+    ``U * (n_hat . axis)`` (full at the pole, tapering to the rim) -- the
+    realistic wavefront for a rigid dome/cone/diaphragm. A flat disc reduces
+    exactly to NORMAL. Mirrors hornlab-metal-bem's SourceMotion for parity.
+    """
+
+    NORMAL = "normal"
+    AXIAL = "axial"
+
+
 AssemblyBackend = Literal["opencl", "numba", "auto"]
 NativeSymmetryPlane = Literal["yz", "xz", "xy", "yz+xz"]
 
@@ -72,6 +87,11 @@ class SolveConfig:
         default_factory=lambda: {2: 1.0}
     )
     velocity_profile: Literal["piston", "dome", "ring"] = "piston"
+    # Direction the prescribed source velocity acts in. "normal" (default) drives
+    # each source face along its own outward normal (breathing cap); "axial"
+    # drives the source as a rigid piston along its axis (v_n = U*(n_hat.axis)).
+    # See SourceMotion. Default "normal" leaves every existing solve unchanged.
+    source_motion: str = SourceMotion.NORMAL
 
     # Robin / impedance boundary condition (wall damping).
     # Maps physical tag -> normalized surface admittance β = ρc / Z_s
@@ -127,6 +147,8 @@ class SolveConfig:
             raise ValueError(
                 "native_symmetry_plane must be None, 'yz', 'xz', 'xy', or 'yz+xz'"
             )
+        if self.source_motion not in {SourceMotion.NORMAL, SourceMotion.AXIAL}:
+            raise ValueError("source_motion must be 'normal' or 'axial'")
 
 
 def reject_unsupported_native_symmetry(config: SolveConfig) -> None:

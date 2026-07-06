@@ -10,7 +10,26 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from hornlab_bempp_bem.config import SolveConfig, VelocityMode
+from types import SimpleNamespace
+
+from hornlab_bempp_bem.config import SolveConfig, SourceMotion, VelocityMode
+
+
+def _two_face_cap_grid(theta_rad: float) -> SimpleNamespace:
+    """Two triangles whose outward unit normals sit at +/- theta from +z (equal
+    area). The area-weighted mean normal (piston axis) is +z, so each face
+    projects to cos(theta); theta=0 is a flat disc (projection 1)."""
+    c = float(np.cos(theta_rad))
+    s = float(np.sin(theta_rad))
+    verts = np.array(
+        [
+            [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-c, 0.0, s],
+            [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-c, 0.0, -s],
+        ],
+        dtype=np.float64,
+    )
+    elements = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.int32)
+    return SimpleNamespace(vertices=verts.T, elements=elements.T)
 
 
 # ---------------------------------------------------------------------------
@@ -234,3 +253,90 @@ class TestComputeSurfacePressureAvg:
 
         np.testing.assert_allclose(result[2], 50.0, rtol=1e-10)
         np.testing.assert_allclose(result[3], 150.0, rtol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Axial (rigid-piston) source motion (parity with hornlab-metal-bem)
+# ---------------------------------------------------------------------------
+
+
+class TestAxialElementScale:
+
+    def test_flat_disc_projects_to_unity(self):
+        from hornlab_bempp_bem.bie import _build_axial_element_scale
+
+        grid = _two_face_cap_grid(0.0)
+        tags = np.array([2, 2], dtype=np.int32)
+        scale = _build_axial_element_scale(grid, tags, [2])
+        np.testing.assert_allclose(scale, [1.0, 1.0], atol=1e-12)
+
+    def test_tilted_cap_projects_to_cos_theta(self):
+        from hornlab_bempp_bem.bie import _build_axial_element_scale
+
+        theta = np.deg2rad(35.0)
+        grid = _two_face_cap_grid(theta)
+        tags = np.array([2, 2], dtype=np.int32)
+        scale = _build_axial_element_scale(grid, tags, [2])
+        np.testing.assert_allclose(scale, [np.cos(theta)] * 2, rtol=1e-9)
+
+    def test_non_source_and_absent_tag(self):
+        from hornlab_bempp_bem.bie import _build_axial_element_scale
+
+        grid = _two_face_cap_grid(np.deg2rad(30.0))
+        tags = np.array([2, 7], dtype=np.int32)
+        scale = _build_axial_element_scale(grid, tags, [2])
+        # Lone source face is its own axis -> projects to 1; tag 7 untouched.
+        np.testing.assert_allclose(scale[0], 1.0, rtol=1e-9)
+        assert scale[1] == 0.0
+        # No source faces -> None (caller keeps the normal BC).
+        assert _build_axial_element_scale(grid, tags, [99]) is None
+
+
+class TestAxialNeumannData:
+
+    def test_axial_flat_disc_matches_normal(self):
+        """A flat disc under axial reproduces the uniform-normal coefficients."""
+        from hornlab_bempp_bem.bie import _build_neumann_data
+
+        grid = _two_face_cap_grid(0.0)
+        tags = np.array([2, 2], dtype=np.int32)
+        omega = 2 * np.pi * 1000.0
+
+        normal_gf, normal_cap = _captured_coefficients()
+        with patch("bempp_cl.api.GridFunction", normal_gf):
+            _build_neumann_data(
+                SimpleNamespace(global_dof_count=2), tags, omega,
+                SolveConfig(velocity_sources={2: 1.0}), "double",
+            )
+        axial_gf, axial_cap = _captured_coefficients()
+        with patch("bempp_cl.api.GridFunction", axial_gf):
+            _build_neumann_data(
+                SimpleNamespace(global_dof_count=2), tags, omega,
+                SolveConfig(velocity_sources={2: 1.0},
+                            source_motion=SourceMotion.AXIAL),
+                "double", grid=grid,
+            )
+        np.testing.assert_allclose(
+            axial_cap["coefficients"], normal_cap["coefficients"], rtol=1e-12
+        )
+
+    def test_axial_curved_cap_tapers_rim(self):
+        """A tilted/curved cap under axial scales each face by cos(theta)."""
+        from hornlab_bempp_bem.bie import _build_neumann_data
+
+        theta = np.deg2rad(40.0)
+        grid = _two_face_cap_grid(theta)
+        tags = np.array([2, 2], dtype=np.int32)
+        omega = 2 * np.pi * 1500.0
+
+        fake_gf, cap = _captured_coefficients()
+        with patch("bempp_cl.api.GridFunction", fake_gf):
+            _build_neumann_data(
+                SimpleNamespace(global_dof_count=2), tags, omega,
+                SolveConfig(velocity_sources={2: 1.0},
+                            velocity_mode=VelocityMode.VELOCITY,
+                            source_motion=SourceMotion.AXIAL),
+                "double", grid=grid,
+            )
+        expected = 1j * 1.2041 * omega * 1.0 * np.cos(theta)
+        np.testing.assert_allclose(cap["coefficients"], [expected, expected], rtol=1e-6)
