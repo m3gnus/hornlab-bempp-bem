@@ -172,8 +172,11 @@ def _build_neumann_data(
 
         v_n = weight
         if config.velocity_mode is VelocityMode.ACCELERATION:
-            # ABEC convention: acceleration a=1, so v = a/(j*omega)
-            v_n = weight / (1j * omega) if omega > 0 else 0.0
+            # Under this package's e^{-i omega t} convention, a*cos(omega t)
+            # integrates to v = a/(-i omega), so q = i rho omega v = -rho a
+            # (momentum: dp/dn = -rho a_n). Matches metal-bem; cross-validated
+            # against ABEC3 absolute pressure (2026-07-09).
+            v_n = weight / (-1j * omega) if omega > 0 else 0.0
 
         # Neumann data: dp/dn = i * rho * omega * v_n
         g_val = 1j * air_density * omega * v_n
@@ -240,7 +243,9 @@ def _build_driver_neumann_coeffs(
             continue
         v_n = weight
         if config.velocity_mode is VelocityMode.ACCELERATION:
-            v_n = weight / (1j * omega) if omega > 0 else 0.0
+            # v = a/(-i omega) under e^{-i omega t}; q = -rho a. See the
+            # matching comment in _build_neumann_grid_function.
+            v_n = weight / (-1j * omega) if omega > 0 else 0.0
         g_val = 1j * air_density * omega * v_n
         dofs = np.where(mask)[0]
         if axial_scale is not None:

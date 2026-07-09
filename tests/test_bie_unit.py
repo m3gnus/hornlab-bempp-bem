@@ -66,8 +66,9 @@ class TestAirDensityInNeumann:
 
             _build_neumann_data(dp0_space, tags, omega, config, "single")
 
-            v_n = 1.0 / (1j * omega)
-            expected_coeff = 1j * 1.2041 * omega * v_n
+            # Acceleration a*cos(omega t) under e^{-i omega t}: q = -rho*a
+            # (momentum equation), frequency-independent.
+            expected_coeff = -1.2041 * 1.0
 
             coeffs = captured["coefficients"]
             source_dofs = np.where(tags == 2)[0]
@@ -92,8 +93,7 @@ class TestAirDensityInNeumann:
 
             _build_neumann_data(dp0_space, tags, omega, config, "double")
 
-            v_n = 1.0 / (1j * omega)
-            expected_coeff = 1j * custom_rho * omega * v_n
+            expected_coeff = -custom_rho * 1.0
 
             coeffs = captured["coefficients"]
             source_dofs = np.where(tags == 2)[0]
