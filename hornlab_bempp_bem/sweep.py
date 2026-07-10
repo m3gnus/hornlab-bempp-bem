@@ -175,7 +175,7 @@ def run_sweep_serial(
 
         # Early-stopping callback
         if has_callback:
-            if not config.on_frequency_result(i, float(freq), log_entry):
+            if config.on_frequency_result(i, float(freq), log_entry) is False:
                 logger.info("Early stop requested after %.1f Hz", freq)
                 break
 
@@ -275,6 +275,11 @@ def run_sweep_parallel(
         (len(frequencies), n_planes, n_angles), -120.0, dtype=np.float64,
     )
     impedance_all = np.zeros(len(frequencies), dtype=np.complex128)
+    source_tags = list(config.velocity_sources.keys())
+    surface_pressure_all = {
+        tag: np.zeros(len(frequencies), dtype=np.complex128)
+        for tag in source_tags
+    }
     solver_log: list[dict] = [{}] * len(frequencies)
 
     import multiprocessing as mp
@@ -301,12 +306,22 @@ def run_sweep_parallel(
 
         for fut in as_completed(futures):
             idx = futures[fut]
-            chunk_pressure, chunk_spl, chunk_imp, chunk_log = fut.result()
+            (
+                chunk_pressure,
+                chunk_spl,
+                chunk_imp,
+                chunk_log,
+                chunk_surface_pressure,
+            ) = fut.result()
             for local_i, global_i in enumerate(idx):
                 pressure_all[global_i] = chunk_pressure[local_i]
                 spl_all[global_i] = chunk_spl[local_i]
                 impedance_all[global_i] = chunk_imp[local_i]
                 solver_log[global_i] = chunk_log[local_i]
+                for tag in source_tags:
+                    surface_pressure_all[tag][global_i] = chunk_surface_pressure[tag][
+                        local_i
+                    ]
             logger.info(
                 "Completed chunk: %d frequencies", len(idx),
             )
@@ -323,6 +338,7 @@ def run_sweep_parallel(
         mesh_info=mesh.info,
         timings={"total_s": time.time() - t_total},
         solver_log=solver_log,
+        surface_pressure_avg=surface_pressure_all if surface_pressure_all else None,
     )
 
 
@@ -339,20 +355,18 @@ def _worker_solve_chunk(
     import bempp_cl.api as bempp_api
 
     from ._constants import REFERENCE_PRESSURE, SPEED_OF_SOUND
-    from .bie import (
-        _evaluate_far_field,
-        _operator_kwargs,
-        solve_single_frequency,
-    )
-
     grid = bempp_api.Grid(mesh_grid_verts, mesh_grid_elems)
-    from .bie import _setup_function_spaces
     p1_space, dp0_space = _setup_function_spaces(grid)
 
     n_planes, n_angles, _ = obs_points.shape
     pressure = np.zeros((len(frequencies), n_planes, n_angles), dtype=np.complex128)
     spl = np.full((len(frequencies), n_planes, n_angles), -120.0)
     impedance = np.zeros(len(frequencies), dtype=np.complex128)
+    source_tags = list(config.velocity_sources.keys())
+    surface_pressure = {
+        tag: np.zeros(len(frequencies), dtype=np.complex128)
+        for tag in source_tags
+    }
     log_entries = []
 
     # On-axis index: the angle closest to 0 degrees
@@ -367,6 +381,15 @@ def _worker_solve_chunk(
             p1_space=p1_space, dp0_space=dp0_space,
         )
         impedance[i] = fr.impedance
+        pavg = compute_surface_pressure_avg(
+            grid,
+            fr.pressure_on_surface,
+            physical_tags,
+            p1_space,
+            source_tags,
+        )
+        for tag in source_tags:
+            surface_pressure[tag][i] = pavg[tag]
         log_entries.append({
             "frequency_hz": fr.frequency_hz,
             "iterations": fr.iterations,
@@ -391,4 +414,4 @@ def _worker_solve_chunk(
             )
             spl[i, pi, :] = spl_raw - spl_raw[on_axis_idx]
 
-    return pressure, spl, impedance, log_entries
+    return pressure, spl, impedance, log_entries, surface_pressure

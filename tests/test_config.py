@@ -72,6 +72,18 @@ def test_auto_backend_resolves_to_opencl():
     assert resolution.fallback_used is False
 
 
+def test_opencl_backend_reports_optional_dependency_install(monkeypatch):
+    import sys
+
+    from hornlab_bempp_bem.device import OpenCLError, configure_opencl
+
+    configure_opencl.cache_clear()
+    monkeypatch.setitem(sys.modules, "pyopencl", None)
+    with pytest.raises(OpenCLError, match=r"hornlab-bempp-bem\[opencl\]"):
+        configure_opencl("cpu")
+    configure_opencl.cache_clear()
+
+
 def test_solve_config_callbacks_accept_callables():
     calls = []
     cfg = SolveConfig(

@@ -135,7 +135,8 @@ class SolveConfig:
 
     # Per-frequency result callback for early stopping.
     # Signature: (freq_index: int, frequency_hz: float, log_entry: dict) -> bool
-    # Return False to abort the sweep (partial SolveResult is built).
+    # Return exactly False to abort the sweep (partial SolveResult is built);
+    # any other return value, including None, continues.
     on_frequency_result: Callable[[int, float, dict], bool] | None = None
 
     def __post_init__(self) -> None:

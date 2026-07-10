@@ -148,21 +148,61 @@ def _merge_duplicate_vertices(
     tris: NDArray[np.int32],
     tol: float,
 ) -> tuple[NDArray[np.float64], NDArray[np.int32], int]:
-    """Merge coincident seam vertices and remap triangle connectivity."""
+    """Merge seam vertices within the requested Euclidean tolerance."""
     if tol <= 0 or len(verts) == 0:
         return verts, tris, 0
 
-    keys = np.round(verts / tol).astype(np.int64)
-    _, first_indices, inverse = np.unique(
-        keys,
-        axis=0,
-        return_index=True,
-        return_inverse=True,
+    if not np.isfinite(tol):
+        raise MeshError("merge_tol must be finite")
+
+    cells = np.floor(verts / tol).astype(np.int64)
+    buckets: dict[tuple[int, int, int], list[int]] = {}
+    for index, key in enumerate(map(tuple, cells)):
+        buckets.setdefault(key, []).append(index)
+
+    parent = np.arange(len(verts), dtype=np.int64)
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[int(parent[index])]
+            index = int(parent[index])
+        return index
+
+    neighbor_offsets = tuple(
+        (dx, dy, dz)
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        for dz in (-1, 0, 1)
     )
-    if len(first_indices) == len(verts):
+    tol_sq = float(tol) ** 2
+    for key, indices in buckets.items():
+        candidates: list[int] = []
+        for dx, dy, dz in neighbor_offsets:
+            candidates.extend(
+                buckets.get((key[0] + dx, key[1] + dy, key[2] + dz), ())
+            )
+        for left in indices:
+            for right in candidates:
+                if right <= left:
+                    continue
+                delta = verts[right] - verts[left]
+                if float(delta @ delta) > tol_sq:
+                    continue
+                root_left = find(left)
+                root_right = find(right)
+                if root_left != root_right:
+                    parent[max(root_left, root_right)] = min(root_left, root_right)
+
+    roots = np.fromiter(
+        (find(index) for index in range(len(verts))),
+        dtype=np.int64,
+        count=len(verts),
+    )
+    unique_roots, inverse = np.unique(roots, return_inverse=True)
+    if len(unique_roots) == len(verts):
         return verts, tris, 0
 
-    merged_verts = verts[first_indices]
+    merged_verts = verts[unique_roots]
     merged_tris = inverse[tris].astype(np.int32, copy=False)
     return merged_verts, merged_tris, len(verts) - len(merged_verts)
 
@@ -174,6 +214,12 @@ def _validate_outward_normals(
     repair: bool = False,
 ) -> None:
     """Validate outward winding, optionally repairing legacy external meshes."""
+    if not _is_closed_two_manifold(tris):
+        # Signed volume is origin-dependent for an open surface. Bare horns are
+        # supported inputs, so do not reject or flip them solely because they
+        # were translated across the coordinate origin.
+        return
+
     signed_vol = _signed_mesh_volume_indicator(verts, tris)
     if signed_vol >= 0:
         return
@@ -197,6 +243,11 @@ def _signed_mesh_volume_indicator(
     """Return the signed volume indicator used for closed-surface winding."""
     p0, p1, p2 = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
     return float(np.sum(p0 * np.cross(p1, p2)))
+
+
+def _is_closed_two_manifold(triangles_nx3: NDArray[np.int32]) -> bool:
+    _edges, counts = _edge_incidence_counts(triangles_nx3)
+    return bool(counts.size and np.all(counts == 2))
 
 
 def _validate_physical_groups(phys_tags: NDArray[np.int32]) -> None:

@@ -15,6 +15,15 @@ def configure_opencl(device_type: str = "cpu") -> str:
         raise OpenCLError("opencl_device must be 'cpu' or 'gpu'")
 
     try:
+        import pyopencl  # noqa: F401
+    except ModuleNotFoundError as exc:
+        raise OpenCLError(
+            "The OpenCL backend requires the optional PyOpenCL dependency. "
+            "Install hornlab-bempp-bem[opencl], or use "
+            "assembly_backend='numba'."
+        ) from exc
+
+    try:
         import bempp_cl.api as bempp_api
         import bempp_cl.core.opencl_kernels as opencl_kernels
     except Exception as exc:  # pragma: no cover - runtime dependent

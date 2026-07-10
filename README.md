@@ -62,6 +62,11 @@ Mesh requirements:
 - triangle winding must be outward for canonical meshes
 - source/radiator tags must match `config.velocity_sources`
 
+Signed-volume winding validation is applied to closed two-manifold meshes. It
+is intentionally not used to flip or reject open surfaces because their signed
+volume changes under a rigid translation; callers remain responsible for the
+declared outward winding on open/bare meshes.
+
 With `require_closed_mesh=True` (or `load_mesh(..., require_closed=True)`),
 the surface must additionally be a closed 2-manifold: every edge shared by
 exactly two triangles. Open edges and non-manifold edges are rejected. The
@@ -89,6 +94,11 @@ Common fields:
 - `opencl_device`, either `"cpu"` or `"gpu"` when using OpenCL
 - `progress_callback`
 - `on_frequency_result`, for streaming progress and early stop
+
+`on_frequency_result` stops only when it returns exactly `False`; callbacks
+used only for side effects may return `None` and the sweep continues. Serial and
+parallel sweeps populate the same result fields, including
+`surface_pressure_avg`.
 
 `ObservationConfig` builds polar observation arcs by default:
 
@@ -145,12 +155,14 @@ condition directly into the linear system and solves once.
 
 ## Assembly Backends
 
-`assembly_backend="opencl"` uses Bempp's OpenCL backend. It requires a working
-OpenCL runtime and, for Python imports, `pyopencl`.
+`assembly_backend="opencl"` uses Bempp's OpenCL backend. Install it with
+`python -m pip install "hornlab-bempp-bem[opencl]"`; it requires both PyOpenCL
+and a working OpenCL runtime.
 
 `assembly_backend="numba"` uses Bempp's Numba backend. It needs a writable
 Numba cache location; set `NUMBA_CACHE_DIR` when running in restricted
-environments.
+environments. The base package is sufficient for this path and does not install
+PyOpenCL.
 
 `assembly_backend="auto"` currently selects the production OpenCL Bempp backend.
 
@@ -180,7 +192,7 @@ absolute complex pressure and derive SPL explicitly when needed.
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev]"  # includes OpenCL test dependencies
 ```
 
 If you already have a HornLab development environment with `bempp_cl`, install
