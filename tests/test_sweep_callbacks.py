@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from hornlab_bempp_bem.config import ObservationConfig, SolveConfig
+from hornlab_bempp_bem.config import ObservationConfig, SolveConfig, SourceMotion
 from hornlab_bempp_bem.observation import ObservationFrame
 from hornlab_bempp_bem.result import MeshInfo
 
@@ -251,7 +251,7 @@ class TestParallelRejectsCallbacks:
     def test_on_frequency_result_rejected(self):
         from hornlab_bempp_bem.sweep import run_sweep_parallel
 
-        config = SolveConfig(on_frequency_result=lambda i, f, l: True)
+        config = SolveConfig(on_frequency_result=lambda i, f, log: True)
         with pytest.raises(ValueError, match="not supported in parallel mode"):
             run_sweep_parallel(
                 _make_mesh(), np.array([100.0]), _make_frame(), config, 2,
@@ -263,6 +263,52 @@ class TestParallelRejectsCallbacks:
 # ---------------------------------------------------------------------------
 
 class TestSurfacePressureAvg:
+
+    def test_serial_sweep_threads_frame_axis_to_axial_source(self):
+        from hornlab_bempp_bem.sweep import run_sweep_serial
+
+        patches = _standard_sweep_patches()
+        frame = _make_frame()
+        config = SolveConfig(
+            source_motion=SourceMotion.AXIAL,
+            observation=ObservationConfig(planes=["horizontal"], angle_count=5),
+        )
+
+        with patches["spaces"], patches["solve"] as solve_mock, patches["pavg"], \
+             patches["ff"], patches["op_kw"], patches["dir"]:
+            run_sweep_serial(
+                _make_mesh(), np.array([500.0, 1000.0]), frame, config,
+            )
+
+        assert solve_mock.call_count == 2
+        for call in solve_mock.call_args_list:
+            np.testing.assert_array_equal(call.kwargs["source_axis"], frame.axis)
+
+    def test_serial_sweep_validates_closed_mesh_once(self):
+        from hornlab_bempp_bem.sweep import run_sweep_serial
+
+        patches = _standard_sweep_patches()
+        mesh = _make_mesh()
+        mesh.grid.vertices = np.zeros((3, 4), dtype=np.float64)
+        mesh.grid.elements = np.zeros((3, 2), dtype=np.int32)
+        config = SolveConfig(
+            require_closed_mesh=True,
+            observation=ObservationConfig(planes=["horizontal"], angle_count=5),
+        )
+
+        with patches["spaces"], patches["solve"] as solve_mock, patches["pavg"], \
+             patches["ff"], patches["op_kw"], patches["dir"], \
+             patch(f"{_SWEEP}._require_closed_surface") as require_closed:
+            run_sweep_serial(
+                mesh, np.array([500.0, 1000.0, 2000.0]), _make_frame(), config,
+            )
+
+        assert require_closed.call_count == 1
+        assert solve_mock.call_count == 3
+        assert all(
+            call.kwargs["closed_mesh_validated"] is True
+            for call in solve_mock.call_args_list
+        )
 
     def test_surface_pressure_avg_in_result(self):
         from hornlab_bempp_bem.sweep import run_sweep_serial
@@ -297,13 +343,14 @@ class TestSurfacePressureAvg:
         from hornlab_bempp_bem.sweep import _worker_solve_chunk
 
         frequencies = np.array([500.0, 1000.0])
+        source_axis = np.array([0.0, 1.0, 0.0])
         config = SolveConfig(
             assembly_backend="numba",
             observation=ObservationConfig(planes=["horizontal"], angle_count=5),
         )
         with patch("bempp_cl.api.Grid", return_value=MagicMock()), \
              patch(f"{_SWEEP}._setup_function_spaces", return_value=(MagicMock(), MagicMock())), \
-             patch(f"{_SWEEP}.solve_single_frequency", side_effect=lambda *a, **k: _fake_frequency_result(float(a[2]))), \
+             patch(f"{_SWEEP}.solve_single_frequency", side_effect=lambda *a, **k: _fake_frequency_result(float(a[2]))) as solve_mock, \
              patch(f"{_SWEEP}.compute_surface_pressure_avg", return_value={2: 100.0 + 50j}), \
              patch(f"{_SWEEP}._evaluate_far_field", return_value=np.ones(5, dtype=np.complex128)), \
              patch(f"{_SWEEP}._operator_kwargs", return_value={}), \
@@ -316,12 +363,21 @@ class TestSurfacePressureAvg:
                 obs_points=np.zeros((1, 5, 3)),
                 angles_deg=np.linspace(0.0, 180.0, 5),
                 config=config,
+                source_axis=source_axis,
             )
 
         surface_pressure = worker_result[4]
         np.testing.assert_allclose(
             surface_pressure[2], [100.0 + 50j, 100.0 + 50j]
         )
+        assert all(
+            call.kwargs["closed_mesh_validated"] is True
+            for call in solve_mock.call_args_list
+        )
+        for call in solve_mock.call_args_list:
+            np.testing.assert_array_equal(
+                call.kwargs["source_axis"], source_axis,
+            )
 
     def test_parallel_result_preserves_worker_surface_pressure_order(self):
         from hornlab_bempp_bem.sweep import run_sweep_parallel
@@ -347,6 +403,7 @@ class TestSurfacePressureAvg:
                 return ImmediateFuture(fn(**kwargs))
 
         def fake_worker(**kwargs):
+            np.testing.assert_array_equal(kwargs["source_axis"], _make_frame().axis)
             freqs = np.asarray(kwargs["frequencies"], dtype=np.float64)
             n_planes, n_angles, _ = kwargs["obs_points"].shape
             return (

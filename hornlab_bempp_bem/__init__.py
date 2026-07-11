@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 
 import numpy as np
 
@@ -28,7 +27,13 @@ from .config import (
     reject_unsupported_native_symmetry,
 )
 from .device import OpenCLError, configure_opencl
-from .mesh import LoadedMesh, MeshError, _require_closed_surface, load_mesh
+from .mesh import (
+    LoadedMesh,
+    MeshError,
+    _require_closed_surface,
+    _validate_velocity_source_tags,
+    load_mesh,
+)
 from .observation import ObservationFrame, infer_frame
 from .result import MeshInfo, SolveResult
 
@@ -82,17 +87,9 @@ def _resolve_mesh(
 
 
 def _resolve_frame(loaded: LoadedMesh, config: SolveConfig) -> ObservationFrame:
-    """Resolve observation frame: use override, skip for custom_points, or infer."""
+    """Resolve the observation frame from an override or mesh inference."""
     if config.frame_override is not None:
         return config.frame_override
-
-    if config.observation.custom_points is not None:
-        # Custom observation points don't need a frame for point construction,
-        # but we still build a minimal frame for metadata. Use infer_frame()
-        # which works fine for standard geometries. For enclosed geometries
-        # where infer_frame might get the axis wrong, callers should set
-        # frame_override explicitly.
-        pass
 
     return infer_frame(
         loaded.grid,
@@ -130,6 +127,7 @@ def solve(
     loaded = _resolve_mesh(
         mesh, scale=config.mesh_scale, require_closed=config.require_closed_mesh
     )
+    _validate_velocity_source_tags(loaded.physical_tags, config.velocity_sources)
     frame = _resolve_frame(loaded, config)
 
     from .sweep import (
@@ -145,9 +143,22 @@ def solve(
         workers = _detect_worker_count()
 
     if workers <= 1:
-        return run_sweep_serial(loaded, frequencies, frame, config)
+        return run_sweep_serial(
+            loaded,
+            frequencies,
+            frame,
+            config,
+            mesh_contracts_validated=True,
+        )
     else:
-        return run_sweep_parallel(loaded, frequencies, frame, config, workers)
+        return run_sweep_parallel(
+            loaded,
+            frequencies,
+            frame,
+            config,
+            workers,
+            mesh_contracts_validated=True,
+        )
 
 
 def solve_frequencies(
@@ -169,6 +180,7 @@ def solve_frequencies(
     loaded = _resolve_mesh(
         mesh, scale=config.mesh_scale, require_closed=config.require_closed_mesh
     )
+    _validate_velocity_source_tags(loaded.physical_tags, config.velocity_sources)
     frame = _resolve_frame(loaded, config)
 
     from .sweep import run_sweep_serial
@@ -176,4 +188,10 @@ def solve_frequencies(
     freqs = np.asarray(frequencies_hz, dtype=np.float64)
 
     # Always serial for caller-ordered frequencies (order matters)
-    return run_sweep_serial(loaded, freqs, frame, config)
+    return run_sweep_serial(
+        loaded,
+        freqs,
+        frame,
+        config,
+        mesh_contracts_validated=True,
+    )

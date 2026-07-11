@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
 
+import hornlab_bempp_bem.validation.native_symmetry as native_symmetry
 from hornlab_bempp_bem.validation.native_symmetry import (
     build_local2global_xy_mirror_orbits,
     build_xy_mirror_orbits,
@@ -14,6 +16,14 @@ from hornlab_bempp_bem.validation.native_symmetry import (
     orbit_reduce_matrix_rhs,
     p1_dof_coordinates,
 )
+
+
+def test_native_symmetry_module_is_pinned_as_validation_only():
+    doc = inspect.getdoc(native_symmetry)
+
+    assert doc is not None
+    assert "Validation-only" in doc
+    assert "not part of the supported Bempp solve path" in doc
 
 
 def test_expand_quarter_mesh_xy_shares_seams_and_preserves_orbits():

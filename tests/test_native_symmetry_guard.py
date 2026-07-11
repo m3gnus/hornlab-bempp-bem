@@ -70,3 +70,30 @@ def test_solve_single_frequency_require_closed_mesh_rejects_open_grid():
             1000.0,
             SolveConfig(require_closed_mesh=True),
         )
+
+
+def test_solve_single_frequency_skips_recheck_for_validated_sweep_mesh(monkeypatch):
+    import hornlab_bempp_bem.bie as bie
+
+    class StopAfterMeshValidation(Exception):
+        pass
+
+    grid = SimpleNamespace(number_of_elements=1)
+
+    def fail_if_rechecked(*_args, **_kwargs):
+        raise AssertionError("closed mesh was revalidated")
+
+    def stop_before_assembly(_grid):
+        raise StopAfterMeshValidation
+
+    monkeypatch.setattr(bie, "_require_closed_surface", fail_if_rechecked)
+    monkeypatch.setattr(bie, "_setup_function_spaces", stop_before_assembly)
+
+    with pytest.raises(StopAfterMeshValidation):
+        solve_single_frequency(
+            grid,
+            np.array([2], dtype=np.int32),
+            1000.0,
+            SolveConfig(require_closed_mesh=True),
+            closed_mesh_validated=True,
+        )

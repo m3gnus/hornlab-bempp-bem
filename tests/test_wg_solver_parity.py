@@ -32,6 +32,7 @@ isn't available — so collection itself is always clean.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -55,8 +56,12 @@ ASRO68_MESH = Path(
 # both the legacy WG path (`wg_solve_asro68_throat.npz`) and the
 # post-seam-merge hornlab path (`hornlab_postfix_asro68.npz`) on this mesh.
 # Used as a sanity oracle when bempp-cl isn't available in the test env.
+_VALIDATION_DIR_OVERRIDE = os.environ.get("HORNLAB_VALIDATION_ARTIFACTS")
 VALIDATION_DIR = (
-    Path(__file__).resolve().parents[2]
+    Path(_VALIDATION_DIR_OVERRIDE).expanduser()
+    if _VALIDATION_DIR_OVERRIDE
+    else Path(__file__).resolve().parents[2]
+    / "hornlab-research"
     / "docs"
     / "research"
     / "260517-abec-vs-wg-validation-artifacts"

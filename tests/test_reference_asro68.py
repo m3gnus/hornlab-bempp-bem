@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -21,8 +22,12 @@ ASRO68_MESH = Path(
     "ATH results 0 degree norm/250917asro68/ABEC_FreeStanding/250917asro68.msh"
 )
 
+_VALIDATION_DIR_OVERRIDE = os.environ.get("HORNLAB_VALIDATION_ARTIFACTS")
 VALIDATION_DIR = (
-    Path(__file__).resolve().parents[2]
+    Path(_VALIDATION_DIR_OVERRIDE).expanduser()
+    if _VALIDATION_DIR_OVERRIDE
+    else Path(__file__).resolve().parents[2]
+    / "hornlab-research"
     / "docs"
     / "research"
     / "260517-abec-vs-wg-validation-artifacts"

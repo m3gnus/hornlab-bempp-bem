@@ -19,7 +19,11 @@ from .bie import (
     solve_single_frequency,
 )
 from .config import SolveConfig
-from .mesh import LoadedMesh
+from .mesh import (
+    LoadedMesh,
+    _require_closed_surface,
+    _validate_velocity_source_tags,
+)
 from .observation import ObservationFrame, build_observation_points
 from .result import SolveResult
 
@@ -89,9 +93,21 @@ def run_sweep_serial(
     frequencies: NDArray[np.float64],
     frame: ObservationFrame,
     config: SolveConfig,
+    *,
+    mesh_contracts_validated: bool = False,
 ) -> SolveResult:
     """Run frequency sweep in a single process."""
     t_total = time.time()
+
+    if not mesh_contracts_validated:
+        _validate_velocity_source_tags(
+            mesh.physical_tags, config.velocity_sources,
+        )
+        if config.require_closed_mesh:
+            _require_closed_surface(
+                np.asarray(mesh.grid.vertices, dtype=np.float64).T,
+                np.asarray(mesh.grid.elements, dtype=np.int32).T,
+            )
 
     obs_points, angles_deg = build_observation_points(frame, config.observation)
 
@@ -118,7 +134,10 @@ def run_sweep_serial(
         logger.info("[%d/%d] %.1f Hz", i + 1, len(frequencies), freq)
         fr = solve_single_frequency(
             mesh.grid, mesh.physical_tags, freq, config,
-            p1_space=p1_space, dp0_space=dp0_space,
+            p1_space=p1_space,
+            dp0_space=dp0_space,
+            source_axis=frame.axis,
+            closed_mesh_validated=True,
         )
         freq_results.append(fr)
         completed_freqs.append(float(freq))
@@ -243,6 +262,8 @@ def run_sweep_parallel(
     frame: ObservationFrame,
     config: SolveConfig,
     worker_count: int,
+    *,
+    mesh_contracts_validated: bool = False,
 ) -> SolveResult:
     """Run frequency sweep across multiple processes.
 
@@ -258,6 +279,16 @@ def run_sweep_parallel(
             "progress_callback and on_frequency_result are not supported in "
             "parallel mode (workers > 1). Use serial mode or set workers=1."
         )
+
+    if not mesh_contracts_validated:
+        _validate_velocity_source_tags(
+            mesh.physical_tags, config.velocity_sources,
+        )
+        if config.require_closed_mesh:
+            _require_closed_surface(
+                np.asarray(mesh.grid.vertices, dtype=np.float64).T,
+                np.asarray(mesh.grid.elements, dtype=np.int32).T,
+            )
 
     t_total = time.time()
     obs_points, angles_deg = build_observation_points(frame, config.observation)
@@ -301,6 +332,7 @@ def run_sweep_parallel(
                 obs_points=obs_points,
                 angles_deg=angles_deg,
                 config=config,
+                source_axis=np.asarray(frame.axis, dtype=np.float64),
             )
             futures[fut] = chunk_idx
 
@@ -350,6 +382,7 @@ def _worker_solve_chunk(
     obs_points,
     angles_deg,
     config,
+    source_axis=None,
 ):
     """Worker function: reconstruct grid, solve, evaluate far-field, return arrays."""
     import bempp_cl.api as bempp_api
@@ -378,7 +411,10 @@ def _worker_solve_chunk(
     for i, freq in enumerate(frequencies):
         fr = solve_single_frequency(
             grid, physical_tags, freq, config,
-            p1_space=p1_space, dp0_space=dp0_space,
+            p1_space=p1_space,
+            dp0_space=dp0_space,
+            source_axis=source_axis,
+            closed_mesh_validated=True,
         )
         impedance[i] = fr.impedance
         pavg = compute_surface_pressure_avg(

@@ -106,6 +106,95 @@ def test_duplicate_merge_uses_actual_euclidean_distance():
     assert merged_tris[0, 0] == merged_tris[0, 1]
 
 
+def _reference_merge_duplicate_vertices(
+    verts: np.ndarray,
+    tris: np.ndarray,
+    tol: float,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Pre-cKDTree spatial-hash merger retained as an equivalence oracle."""
+    cells = np.floor(verts / tol).astype(np.int64)
+    buckets: dict[tuple[int, int, int], list[int]] = {}
+    for index, key in enumerate(map(tuple, cells)):
+        buckets.setdefault(key, []).append(index)
+
+    parent = np.arange(len(verts), dtype=np.int64)
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[int(parent[index])]
+            index = int(parent[index])
+        return index
+
+    offsets = [
+        (dx, dy, dz)
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        for dz in (-1, 0, 1)
+    ]
+    tol_sq = float(tol) ** 2
+    for key, indices in buckets.items():
+        neighbours = [
+            neighbour
+            for dx, dy, dz in offsets
+            for neighbour in buckets.get((key[0] + dx, key[1] + dy, key[2] + dz), ())
+        ]
+        for left in indices:
+            for right in neighbours:
+                if right <= left:
+                    continue
+                delta = verts[right] - verts[left]
+                if float(delta @ delta) > tol_sq:
+                    continue
+                root_left = find(left)
+                root_right = find(right)
+                if root_left != root_right:
+                    parent[max(root_left, root_right)] = min(root_left, root_right)
+
+    roots = np.fromiter(
+        (find(index) for index in range(len(verts))),
+        dtype=np.int64,
+        count=len(verts),
+    )
+    unique_roots, inverse = np.unique(roots, return_inverse=True)
+    if len(unique_roots) == len(verts):
+        return verts, tris, 0
+    return (
+        verts[unique_roots],
+        inverse[tris].astype(np.int32, copy=False),
+        len(verts) - len(unique_roots),
+    )
+
+
+def test_duplicate_merge_matches_spatial_hash_reference_on_edge_fixtures():
+    vertices = np.array(
+        [
+            [30.9, 0.0, 0.0],
+            [10.49, 10.49, 10.49],
+            [0.0, 0.0, 0.0],
+            [40.0, 0.0, 0.0],
+            [21.0, 0.0, 0.0],
+            [31.8, 0.0, 0.0],
+            [-0.6369326152038236, -0.7154417306587971, -0.28715844706635957],
+            [40.0, 0.0, 0.0],
+            [20.49, 0.0, 0.0],
+            [9.51, 9.51, 9.51],
+            [30.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    triangles = np.array(
+        [[2, 0, 4], [8, 7, 5], [1, 9, 3], [10, 6, 4]],
+        dtype=np.int32,
+    )
+
+    expected = _reference_merge_duplicate_vertices(vertices, triangles, 1.0)
+    actual = _merge_duplicate_vertices(vertices, triangles, 1.0)
+
+    assert actual[2] == expected[2]
+    np.testing.assert_array_equal(actual[0], expected[0])
+    np.testing.assert_array_equal(actual[1], expected[1])
+
+
 def _half_cube() -> tuple[np.ndarray, np.ndarray]:
     # Cube surface cut at x=0 keeping x >= 0: open rim is exactly the x=0
     # square — the canonical mirror-reduced (half) mesh shape.
@@ -225,6 +314,26 @@ def test_load_mesh_require_closed(tmp_path):
     nonmanifold.write_text(_tet_msh_text(drop_wall_face=False, duplicate_wall_face=True))
     with pytest.raises(MeshError, match="non-manifold"):
         load_mesh(nonmanifold, require_closed=True)
+
+
+def test_load_mesh_reuses_edge_incidence_for_validation(monkeypatch, tmp_path):
+    import hornlab_bempp_bem.mesh as mesh_module
+
+    mesh_path = tmp_path / "tet.msh"
+    mesh_path.write_text(_tet_msh_text(drop_wall_face=False))
+    original = mesh_module._edge_incidence_counts
+    call_count = 0
+
+    def count_calls(triangles):
+        nonlocal call_count
+        call_count += 1
+        return original(triangles)
+
+    monkeypatch.setattr(mesh_module, "_edge_incidence_counts", count_calls)
+
+    mesh_module.load_mesh(mesh_path, require_closed=True, validate=True)
+
+    assert call_count == 1
 
 
 def test_resolve_loaded_mesh_require_closed_rechecks_boundaries():

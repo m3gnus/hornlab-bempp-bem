@@ -1,10 +1,19 @@
 """Unit tests for hornlab_bempp_bem.config — pure dataclass tests, no bempp needed."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 
 from hornlab_bempp_bem.backends import resolve_assembly_backend
-from hornlab_bempp_bem.config import ObservationConfig, SolveConfig
+from hornlab_bempp_bem.config import (
+    BIEFormulation,
+    LinearSolver,
+    ObservationConfig,
+    SolveConfig,
+    VelocityMode,
+)
 
 
 def test_observation_config_custom_points_defaults_none():
@@ -52,6 +61,58 @@ def test_solve_config_rejects_unknown_backend():
 def test_solve_config_rejects_metal_backend():
     with pytest.raises(ValueError, match="assembly_backend"):
         SolveConfig(assembly_backend="metal")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("formulation", "standard", BIEFormulation.STANDARD),
+        ("formulation", "complex_k", BIEFormulation.COMPLEX_K),
+        ("formulation", "burton_miller", BIEFormulation.BURTON_MILLER),
+        ("solver", "auto", LinearSolver.AUTO),
+        ("solver", "lu", LinearSolver.LU),
+        ("solver", "gmres", LinearSolver.GMRES),
+        ("velocity_mode", "velocity", VelocityMode.VELOCITY),
+        ("velocity_mode", "acceleration", VelocityMode.ACCELERATION),
+    ],
+)
+def test_solve_config_coerces_string_enum_values(field, value, expected):
+    config = SolveConfig(**{field: value})
+
+    assert getattr(config, field) is expected
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        (
+            {"formulation": "combined"},
+            "formulation must be 'standard', 'complex_k', or 'burton_miller'",
+        ),
+        ({"solver": "dense"}, "solver must be 'auto', 'lu', or 'gmres'"),
+        (
+            {"velocity_mode": "displacement"},
+            "velocity_mode must be 'velocity' or 'acceleration'",
+        ),
+        ({"precision": "half"}, "precision must be 'single' or 'double'"),
+    ],
+)
+def test_solve_config_rejects_invalid_solve_modes(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        SolveConfig(**kwargs)
+
+
+@pytest.mark.parametrize("profile", ["dome", "ring"])
+def test_solve_config_rejects_unimplemented_velocity_profiles(profile):
+    with pytest.raises(
+        NotImplementedError,
+        match=r"only supports velocity_profile='piston'",
+    ):
+        SolveConfig(velocity_profile=profile)
+
+
+def test_solve_config_accepts_compatibility_piston_profile():
+    assert SolveConfig(velocity_profile="piston").velocity_profile == "piston"
 
 
 def test_solve_config_rejects_unknown_native_symmetry_plane():
@@ -107,3 +168,28 @@ def test_require_closed_mesh_defaults_off_and_forwards():
     # The loader accepts the flag and the resolver forwards it.
     assert "require_closed" in inspect.signature(load_mesh).parameters
     assert "require_closed" in inspect.signature(_resolve_mesh).parameters
+
+
+@pytest.mark.parametrize("entrypoint", ["solve", "solve_frequencies"])
+def test_public_solve_rejects_velocity_source_tags_missing_from_mesh(entrypoint):
+    import hornlab_bempp_bem
+    from hornlab_bempp_bem.mesh import LoadedMesh
+
+    loaded = LoadedMesh(
+        grid=SimpleNamespace(),
+        physical_tags=np.array([2, 1, 2, 1], dtype=np.int32),
+        info=SimpleNamespace(),
+    )
+    config = SolveConfig(velocity_sources={4: 1.0, 3: 0.5})
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"velocity_sources tags \[3, 4\] are not present in the mesh; "
+            r"available physical tags: \[1, 2\]"
+        ),
+    ):
+        if entrypoint == "solve":
+            hornlab_bempp_bem.solve(loaded, config)
+        else:
+            hornlab_bempp_bem.solve_frequencies(loaded, [1000.0], config)

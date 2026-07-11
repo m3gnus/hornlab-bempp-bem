@@ -140,6 +140,24 @@ class SolveConfig:
     on_frequency_result: Callable[[int, float, dict], bool] | None = None
 
     def __post_init__(self) -> None:
+        try:
+            self.formulation = BIEFormulation(self.formulation)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "formulation must be 'standard', 'complex_k', or 'burton_miller'"
+            ) from None
+        try:
+            self.solver = LinearSolver(self.solver)
+        except (TypeError, ValueError):
+            raise ValueError("solver must be 'auto', 'lu', or 'gmres'") from None
+        try:
+            self.velocity_mode = VelocityMode(self.velocity_mode)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "velocity_mode must be 'velocity' or 'acceleration'"
+            ) from None
+        if self.precision not in {"single", "double"}:
+            raise ValueError("precision must be 'single' or 'double'")
         if self.assembly_backend not in {"opencl", "numba", "auto"}:
             raise ValueError(
                 "assembly_backend must be one of: auto, opencl, numba"
@@ -150,6 +168,12 @@ class SolveConfig:
             )
         if self.source_motion not in {SourceMotion.NORMAL, SourceMotion.AXIAL}:
             raise ValueError("source_motion must be 'normal' or 'axial'")
+        if self.velocity_profile != "piston":
+            raise NotImplementedError(
+                "hornlab-bempp-bem only supports velocity_profile='piston'; "
+                "use hornlab-metal-bem source_velocity_profiles for shaped "
+                "source profiles"
+            )
 
 
 def reject_unsupported_native_symmetry(config: SolveConfig) -> None:

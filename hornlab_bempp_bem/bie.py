@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from ._constants import REFERENCE_PRESSURE, SPEED_OF_SOUND
+from ._constants import SPEED_OF_SOUND
 from .backends import resolve_assembly_backend
 from .config import (
     BIEFormulation,
@@ -24,12 +24,6 @@ from .config import (
 from .mesh import _require_closed_surface
 
 logger = logging.getLogger(__name__)
-
-VELOCITY_PROFILES = {
-    "piston": lambda r_norm: np.ones_like(r_norm),
-    "dome": lambda r_norm: np.cos(np.pi * r_norm / 2),
-    "ring": lambda r_norm: np.where(r_norm > 0.7, 1.0, 0.0),
-}
 
 
 @dataclass
@@ -89,20 +83,24 @@ def _build_axial_element_scale(
     grid,
     physical_tags: NDArray[np.int32],
     source_tags,
+    axis: NDArray[np.float64],
 ) -> NDArray | None:
     """Per-element ``n_hat . axis`` projection for a rigid axial (piston) source.
 
-    For each source tag the piston axis is that tag's area-weighted mean outward
-    normal; each of the tag's faces is scaled by the cosine between its outward
-    normal and that axis (1 at the pole, tapering to the rim). A flat disc yields
-    1.0 on every face, so an axial source reduces exactly to the uniform-normal
-    BC there. Non-source faces stay 0.0. Because the axis is the mean of the same
-    outward normals, the projection is naturally outward-positive (matching the
-    normal BC's sign). Bempp solves full-domain meshes only
-    (reject_unsupported_native_symmetry), so no symmetry projection is needed.
-    Mirrors hornlab-metal-bem's _build_axial_face_scale. Returns None when no
-    source face yields a usable axis, so the caller keeps the normal BC.
+    ``axis`` is the resolved observation-frame axis shared by every source tag.
+    Each tag gets one area-weighted sign vote so its drive remains
+    outward-positive, while the per-face projection retains the frame-relative
+    cosine used by hornlab-metal-bem. Returns ``None`` for a degenerate axis or
+    when no configured source face is present.
     """
+    axis = np.asarray(axis, dtype=np.float64).reshape(-1)
+    if axis.shape[0] != 3:
+        return None
+    axis_norm = float(np.linalg.norm(axis))
+    if not np.isfinite(axis_norm) or axis_norm <= 1e-12:
+        return None
+    axis = axis / axis_norm
+
     vertices = np.asarray(grid.vertices.T, dtype=np.float64)
     elements = np.asarray(grid.elements.T, dtype=np.int32)
     n_elem = elements.shape[0]
@@ -120,18 +118,12 @@ def _build_axial_element_scale(
         if idx.size == 0:
             continue
         tag_mags = mags[idx]
-        good = tag_mags > 1e-15
-        if not np.any(good):
-            continue
-        axis_vec = raw[idx][good].sum(axis=0)  # area-weighted mean outward normal
-        axis_norm = float(np.linalg.norm(axis_vec))
-        if axis_norm <= 1e-12:
-            scale[idx] = 1.0  # degenerate normals: fall back to uniform normal
-            continue
-        axis = axis_vec / axis_norm
-        safe = np.where(tag_mags > 1e-15, tag_mags, 1.0)
-        unit_normals = raw[idx] / safe[:, None]
-        scale[idx] = unit_normals @ axis
+        safe_mags = np.where(tag_mags > 1e-15, tag_mags, 1.0)
+        unit_normals = raw[idx] / safe_mags[:, None]
+        projection = unit_normals @ axis
+        if float(np.dot(projection, tag_mags)) < 0.0:
+            projection = -projection
+        scale[idx] = projection
         any_source = True
 
     return scale if any_source else None
@@ -144,6 +136,7 @@ def _build_neumann_data(
     config: SolveConfig,
     precision: str = "single",
     grid=None,
+    source_axis: NDArray[np.float64] | None = None,
 ) -> object:
     """Construct Neumann boundary condition: dp/dn = i*rho*omega*v_n.
 
@@ -160,9 +153,11 @@ def _build_neumann_data(
 
     air_density = config.air_density
     axial_scale = None
-    if config.source_motion == SourceMotion.AXIAL and grid is not None:
+    if config.source_motion == SourceMotion.AXIAL:
+        if grid is None or source_axis is None:
+            raise ValueError("axial source motion requires a grid and source_axis")
         axial_scale = _build_axial_element_scale(
-            grid, physical_tags, config.velocity_sources.keys()
+            grid, physical_tags, config.velocity_sources.keys(), source_axis
         )
 
     for tag, weight in config.velocity_sources.items():
@@ -218,6 +213,7 @@ def _build_driver_neumann_coeffs(
     config: SolveConfig,
     dtype: type,
     grid=None,
+    source_axis: NDArray[np.float64] | None = None,
 ) -> NDArray:
     """Build Neumann coefficients with velocity sources only — zero on
     impedance tags (Robin BCs are folded into the LHS instead).
@@ -230,9 +226,11 @@ def _build_driver_neumann_coeffs(
     air_density = config.air_density
     impedance_tag_set = set(config.impedance_sources.keys())
     axial_scale = None
-    if config.source_motion == SourceMotion.AXIAL and grid is not None:
+    if config.source_motion == SourceMotion.AXIAL:
+        if grid is None or source_axis is None:
+            raise ValueError("axial source motion requires a grid and source_axis")
         axial_scale = _build_axial_element_scale(
-            grid, physical_tags, config.velocity_sources.keys()
+            grid, physical_tags, config.velocity_sources.keys(), source_axis
         )
     for tag, weight in config.velocity_sources.items():
         if tag in impedance_tag_set:
@@ -244,7 +242,7 @@ def _build_driver_neumann_coeffs(
         v_n = weight
         if config.velocity_mode is VelocityMode.ACCELERATION:
             # v = a/(-i omega) under e^{-i omega t}; q = -rho a. See the
-            # matching comment in _build_neumann_grid_function.
+            # matching comment in _build_neumann_data.
             v_n = weight / (-1j * omega) if omega > 0 else 0.0
         g_val = 1j * air_density * omega * v_n
         dofs = np.where(mask)[0]
@@ -264,6 +262,7 @@ def _assemble_and_solve_impedance(
     omega: float,
     config: SolveConfig,
     op_kwargs_low: dict,
+    source_axis: NDArray[np.float64] | None = None,
 ):
     """Direct (non-iterative) solve for the BIE with Robin BCs.
 
@@ -325,7 +324,13 @@ def _assemble_and_solve_impedance(
 
     # RHS = V · g_drv, with g_drv zero on impedance tags
     g_drv = _build_driver_neumann_coeffs(
-        dp0_space, physical_tags, omega, config, dtype_solve, grid=grid,
+        dp0_space,
+        physical_tags,
+        omega,
+        config,
+        dtype_solve,
+        grid=grid,
+        source_axis=source_axis,
     )
     rhs_vec = V_mat @ g_drv
 
@@ -450,37 +455,16 @@ def _compute_impedance(
     p_surface,
     physical_tags: NDArray[np.int32],
     p1_space,
-    velocity_weights: NDArray | None = None,
     source_tag: int = 2,
 ) -> complex:
-    """Throat impedance: Z = integral(p dA) / Q_eff."""
-    elements = np.array(grid.elements.T, dtype=np.int32)
-    source_mask = physical_tags == source_tag
-    source_elems = np.where(source_mask)[0]
-
-    if len(source_elems) == 0:
-        return 0.0 + 0.0j
-
-    areas = np.array(grid.volumes)[source_elems]
-    coeffs = np.asarray(p_surface.coefficients)
-
-    # P1 DOFs per element: average the 3 vertex pressures
-    local2global = np.array(p1_space.local2global)
-    source_p1_dofs = local2global[source_elems]  # (N, 3)
-    p_at_verts = coeffs[source_p1_dofs]           # (N, 3) complex
-    p_avg = np.mean(p_at_verts, axis=1)           # (N,)
-
-    total_force = np.sum(p_avg * areas)
-
-    if velocity_weights is not None and len(velocity_weights) == len(source_elems):
-        q_eff = np.sum(velocity_weights * areas)
-    else:
-        q_eff = np.sum(areas)
-
-    if abs(q_eff) < 1e-30:
-        return 0.0 + 0.0j
-
-    return complex(total_force / q_eff)
+    """Area-weighted average source pressure in pascals per unit drive."""
+    return compute_surface_pressure_avg(
+        grid,
+        p_surface,
+        physical_tags,
+        p1_space,
+        [source_tag],
+    )[source_tag]
 
 
 def compute_surface_pressure_avg(
@@ -494,7 +478,6 @@ def compute_surface_pressure_avg(
 
     Returns a dict mapping tag -> complex average pressure.
     """
-    elements = np.array(grid.elements.T, dtype=np.int32)
     areas = np.array(grid.volumes)
     coeffs = np.asarray(p_surface.coefficients)
     local2global = np.array(p1_space.local2global)
@@ -528,6 +511,8 @@ def solve_single_frequency(
     config: SolveConfig,
     p1_space=None,
     dp0_space=None,
+    source_axis: NDArray[np.float64] | None = None,
+    closed_mesh_validated: bool = False,
 ) -> FrequencyResult:
     """Solve the BEM problem at a single frequency.
 
@@ -536,7 +521,19 @@ def solve_single_frequency(
     ∂p/∂n = i·k·β·p directly into the BIE for a single LU solve.
     """
     reject_unsupported_native_symmetry(config)
-    if config.require_closed_mesh:
+    if config.source_motion == SourceMotion.AXIAL and source_axis is None:
+        if config.frame_override is not None:
+            source_axis = np.asarray(config.frame_override.axis, dtype=np.float64)
+        else:
+            from .observation import infer_frame
+
+            source_axis = infer_frame(
+                grid,
+                physical_tags,
+                source_tag=min(config.velocity_sources.keys(), default=2),
+                origin_at=config.observation.origin,
+            ).axis
+    if config.require_closed_mesh and not closed_mesh_validated:
         _require_closed_surface(
             np.asarray(grid.vertices, dtype=np.float64).T,
             np.asarray(grid.elements, dtype=np.int32).T,
@@ -588,11 +585,17 @@ def solve_single_frequency(
         })
         p_surface, neumann_fun, iterations, converged = _assemble_and_solve_impedance(
             grid, p1_space, dp0_space, physical_tags,
-            k, omega, impedance_config, op_kwargs_low,
+            k, omega, impedance_config, op_kwargs_low, source_axis=source_axis,
         )
     else:
         neumann_fun = _build_neumann_data(
-            dp0_space, physical_tags, omega, config, config.precision, grid=grid,
+            dp0_space,
+            physical_tags,
+            omega,
+            config,
+            config.precision,
+            grid=grid,
+            source_axis=source_axis,
         )
         p_surface, iterations, converged = _assemble_and_solve(
             grid, p1_space, dp0_space, neumann_fun,

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.spatial import cKDTree
 
 from .result import MeshInfo
 
@@ -80,16 +81,24 @@ def load_mesh(
         triangles = triangles[valid]
         phys_tags = phys_tags[valid]
 
+    edge_incidence = (
+        _edge_incidence_counts(triangles) if require_closed or validate else None
+    )
     if require_closed:
-        _require_closed_surface(verts, triangles)
+        _require_closed_surface(
+            verts, triangles, edge_incidence=edge_incidence,
+        )
     elif validate:
-        _warn_if_reduced_symmetry_mesh(verts, triangles)
+        _warn_if_reduced_symmetry_mesh(
+            verts, triangles, edge_incidence=edge_incidence,
+        )
 
     if validate:
         _validate_outward_normals(
             verts,
             triangles,
             repair=repair_normals,
+            edge_incidence=edge_incidence,
         )
         _validate_physical_groups(phys_tags)
 
@@ -148,17 +157,17 @@ def _merge_duplicate_vertices(
     tris: NDArray[np.int32],
     tol: float,
 ) -> tuple[NDArray[np.float64], NDArray[np.int32], int]:
-    """Merge seam vertices within the requested Euclidean tolerance."""
+    """Merge seam vertices within the requested Euclidean tolerance.
+
+    Pairs come from a spatial tree, then union only after an exact
+    squared-distance check. This preserves the Euclidean tolerance semantics
+    at search-cell boundaries without making every mesh load Python-loop bound.
+    """
     if tol <= 0 or len(verts) == 0:
         return verts, tris, 0
 
     if not np.isfinite(tol):
         raise MeshError("merge_tol must be finite")
-
-    cells = np.floor(verts / tol).astype(np.int64)
-    buckets: dict[tuple[int, int, int], list[int]] = {}
-    for index, key in enumerate(map(tuple, cells)):
-        buckets.setdefault(key, []).append(index)
 
     parent = np.arange(len(verts), dtype=np.int64)
 
@@ -168,30 +177,22 @@ def _merge_duplicate_vertices(
             index = int(parent[index])
         return index
 
-    neighbor_offsets = tuple(
-        (dx, dy, dz)
-        for dx in (-1, 0, 1)
-        for dy in (-1, 0, 1)
-        for dz in (-1, 0, 1)
-    )
     tol_sq = float(tol) ** 2
-    for key, indices in buckets.items():
-        candidates: list[int] = []
-        for dx, dy, dz in neighbor_offsets:
-            candidates.extend(
-                buckets.get((key[0] + dx, key[1] + dy, key[2] + dz), ())
-            )
-        for left in indices:
-            for right in candidates:
-                if right <= left:
-                    continue
-                delta = verts[right] - verts[left]
-                if float(delta @ delta) > tol_sq:
-                    continue
-                root_left = find(left)
-                root_right = find(right)
-                if root_left != root_right:
-                    parent[max(root_left, root_right)] = min(root_left, root_right)
+    # ``query_pairs(tol)`` can exclude a pair whose squared distance rounds to
+    # exactly ``tol_sq``. Search one representable step wider, then retain the
+    # squared-distance predicate as the semantic authority.
+    search_radius = np.nextafter(float(tol), np.inf)
+    pairs = cKDTree(verts).query_pairs(search_radius, output_type="ndarray")
+    for left, right in pairs:
+        left_index = int(left)
+        right_index = int(right)
+        delta = verts[right_index] - verts[left_index]
+        if float(delta @ delta) > tol_sq:
+            continue
+        root_left = find(left_index)
+        root_right = find(right_index)
+        if root_left != root_right:
+            parent[max(root_left, root_right)] = min(root_left, root_right)
 
     roots = np.fromiter(
         (find(index) for index in range(len(verts))),
@@ -212,9 +213,10 @@ def _validate_outward_normals(
     tris: NDArray[np.int32],
     *,
     repair: bool = False,
+    edge_incidence: tuple[NDArray[np.int32], NDArray[np.int64]] | None = None,
 ) -> None:
     """Validate outward winding, optionally repairing legacy external meshes."""
-    if not _is_closed_two_manifold(tris):
+    if not _is_closed_two_manifold(tris, edge_incidence=edge_incidence):
         # Signed volume is origin-dependent for an open surface. Bare horns are
         # supported inputs, so do not reject or flip them solely because they
         # were translated across the coordinate origin.
@@ -245,8 +247,14 @@ def _signed_mesh_volume_indicator(
     return float(np.sum(p0 * np.cross(p1, p2)))
 
 
-def _is_closed_two_manifold(triangles_nx3: NDArray[np.int32]) -> bool:
-    _edges, counts = _edge_incidence_counts(triangles_nx3)
+def _is_closed_two_manifold(
+    triangles_nx3: NDArray[np.int32],
+    *,
+    edge_incidence: tuple[NDArray[np.int32], NDArray[np.int64]] | None = None,
+) -> bool:
+    if edge_incidence is None:
+        edge_incidence = _edge_incidence_counts(triangles_nx3)
+    _edges, counts = edge_incidence
     return bool(counts.size and np.all(counts == 2))
 
 
@@ -260,8 +268,24 @@ def _validate_physical_groups(phys_tags: NDArray[np.int32]) -> None:
         logger.warning("No rigid wall (tag 1) in mesh")
 
 
+def _validate_velocity_source_tags(
+    physical_tags: NDArray[np.int32],
+    velocity_sources: dict[int, float],
+) -> None:
+    """Require every configured velocity-source tag to exist in the mesh."""
+    mesh_tags = {int(tag) for tag in np.unique(physical_tags)}
+    missing_tags = sorted(set(velocity_sources) - mesh_tags)
+    if missing_tags:
+        raise ValueError(
+            f"velocity_sources tags {missing_tags} are not present in the mesh; "
+            f"available physical tags: {sorted(mesh_tags)}"
+        )
+
+
 def open_boundary_edges(
     triangles_nx3: NDArray[np.int32],
+    *,
+    edge_incidence: tuple[NDArray[np.int32], NDArray[np.int64]] | None = None,
 ) -> NDArray[np.int32]:
     """Return ``(n, 2)`` sorted vertex pairs for edges used by exactly one triangle.
 
@@ -269,7 +293,9 @@ def open_boundary_edges(
     open rim on the cut plane(s). Ported from hornlab-metal-bem so both
     solvers share the canonical-mesh closure contract.
     """
-    unique_edges, counts = _edge_incidence_counts(triangles_nx3)
+    if edge_incidence is None:
+        edge_incidence = _edge_incidence_counts(triangles_nx3)
+    unique_edges, counts = edge_incidence
     if unique_edges.size == 0:
         return np.empty((0, 2), dtype=np.int32)
     return np.ascontiguousarray(unique_edges[counts == 1], dtype=np.int32)
@@ -295,10 +321,16 @@ def _edge_incidence_counts(
 def _require_closed_surface(
     vertices_nx3: NDArray[np.float64],
     triangles_nx3: NDArray[np.int32],
+    *,
+    edge_incidence: tuple[NDArray[np.int32], NDArray[np.int64]] | None = None,
 ) -> None:
     """Raise when a closed-mode caller gives this backend an open surface."""
     verts = np.asarray(vertices_nx3, dtype=np.float64)
-    edges, counts = _edge_incidence_counts(np.asarray(triangles_nx3, dtype=np.int32))
+    if edge_incidence is None:
+        edge_incidence = _edge_incidence_counts(
+            np.asarray(triangles_nx3, dtype=np.int32)
+        )
+    edges, counts = edge_incidence
     bad = counts != 2
     if not np.any(bad):
         return
@@ -326,6 +358,7 @@ def detect_reduced_symmetry_plane(
     triangles_nx3: NDArray[np.int32],
     *,
     tolerance: float = _SYMMETRY_SNAP_TOLERANCE,
+    edge_incidence: tuple[NDArray[np.int32], NDArray[np.int64]] | None = None,
 ) -> str | None:
     """Heuristically detect mirror-reduced meshes (quarter/half models).
 
@@ -343,7 +376,9 @@ def detect_reduced_symmetry_plane(
     if used_vertices.size == 0:
         return None
 
-    boundary_edges = open_boundary_edges(triangles)
+    boundary_edges = open_boundary_edges(
+        triangles, edge_incidence=edge_incidence,
+    )
     if boundary_edges.size == 0:
         return None
 
@@ -386,8 +421,14 @@ def detect_reduced_symmetry_plane(
 def _warn_if_reduced_symmetry_mesh(
     vertices_nx3: NDArray[np.float64],
     triangles_nx3: NDArray[np.int32],
+    *,
+    edge_incidence: tuple[NDArray[np.int32], NDArray[np.int64]] | None = None,
 ) -> None:
-    suspected = detect_reduced_symmetry_plane(vertices_nx3, triangles_nx3)
+    suspected = detect_reduced_symmetry_plane(
+        vertices_nx3,
+        triangles_nx3,
+        edge_incidence=edge_incidence,
+    )
     if suspected is None:
         return
     warnings.warn(
