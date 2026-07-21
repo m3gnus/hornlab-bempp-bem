@@ -26,7 +26,7 @@ BM in production paths, so the parity gate doesn't need BM coverage.
 
 The slow tests are marked ``@pytest.mark.slow`` and won't run by
 default; trigger them with ``pytest -m slow`` from the
-``hornlab-solver/`` root.  Each test skips gracefully when bempp-cl,
+``hornlab-bempp-bem/`` root.  Each test skips gracefully when bempp-cl,
 the OpenCL CPU runtime, the WG checkout, or the ABEC reference mesh
 isn't available — so collection itself is always clean.
 """
@@ -47,10 +47,8 @@ import pytest
 # Same path as test_reference_asro68.py — the canonical anchor for solver
 # parity is the ABEC ASRO68 mesh that drove the May 2026 BEM-vs-ATH gap
 # resolution (commit 27902f5).
-ASRO68_MESH = Path(
-    "/Users/magnus/IM Dropbox/Magnus Andersen/DOCS/code/misc/"
-    "ATH results 0 degree norm/250917asro68/ABEC_FreeStanding/250917asro68.msh"
-)
+_ASRO68_MESH_OVERRIDE = os.environ.get("HORNLAB_ASRO68_MESH")
+ASRO68_MESH = Path(_ASRO68_MESH_OVERRIDE).expanduser() if _ASRO68_MESH_OVERRIDE else None
 
 # The validation artifacts ship pre-computed reference NPZs that capture
 # both the legacy WG path (`wg_solve_asro68_throat.npz`) and the
@@ -60,11 +58,7 @@ _VALIDATION_DIR_OVERRIDE = os.environ.get("HORNLAB_VALIDATION_ARTIFACTS")
 VALIDATION_DIR = (
     Path(_VALIDATION_DIR_OVERRIDE).expanduser()
     if _VALIDATION_DIR_OVERRIDE
-    else Path(__file__).resolve().parents[2]
-    / "hornlab-research"
-    / "docs"
-    / "research"
-    / "260517-abec-vs-wg-validation-artifacts"
+    else None
 )
 
 
@@ -84,8 +78,10 @@ def _require_bempp_cpu() -> None:
 
 
 def _require_asro68_mesh() -> Path:
-    if not ASRO68_MESH.exists():
-        pytest.skip(f"ASRO68 ABEC reference mesh not found: {ASRO68_MESH}")
+    if ASRO68_MESH is None:
+        pytest.skip("set HORNLAB_ASRO68_MESH to run the external ASRO68 validation tests")
+    if not ASRO68_MESH.is_file():
+        pytest.skip(f"HORNLAB_ASRO68_MESH does not name a file: {ASRO68_MESH}")
     return ASRO68_MESH
 
 
@@ -95,10 +91,12 @@ def _wg_solve_optimized():
     Returns the function plus the WG load helper, mirroring how the
     mesher parity tests load `_wg_tools()`.
     """
-    root = Path(__file__).resolve().parents[2]
-    server = root / "Waveguide-Generator" / "server"
-    if not server.exists():
-        pytest.skip("Waveguide-Generator checkout not available for parity test")
+    server_override = os.environ.get("HORNLAB_WAVEGUIDE_GENERATOR_SERVER")
+    if not server_override:
+        pytest.skip("set HORNLAB_WAVEGUIDE_GENERATOR_SERVER to run legacy solver parity tests")
+    server = Path(server_override).expanduser()
+    if not server.is_dir():
+        pytest.skip(f"HORNLAB_WAVEGUIDE_GENERATOR_SERVER is not a directory: {server}")
     sys.path.insert(0, str(server))
     try:
         from solver.mesh import load_msh_for_bem
@@ -286,8 +284,10 @@ def test_validation_npz_round_trip_smoke():
     stronger end-to-end parity check (canonical vs legacy WG solver on
     the same mesh) is the ``@pytest.mark.slow`` test below.
     """
-    if not VALIDATION_DIR.exists():
-        pytest.skip(f"Validation artifacts dir missing: {VALIDATION_DIR}")
+    if VALIDATION_DIR is None:
+        pytest.skip("set HORNLAB_VALIDATION_ARTIFACTS to run external artifact validation")
+    if not VALIDATION_DIR.is_dir():
+        pytest.skip(f"HORNLAB_VALIDATION_ARTIFACTS is not a directory: {VALIDATION_DIR}")
 
     hl_npz = VALIDATION_DIR / "hornlab_postfix_asro68.npz"
     abec_npz = VALIDATION_DIR / "abec_baseline_asro68.npz"

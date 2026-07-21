@@ -17,26 +17,22 @@ from hornlab_bempp_bem import (
 )
 
 
-ASRO68_MESH = Path(
-    "/Users/magnus/IM Dropbox/Magnus Andersen/DOCS/code/misc/"
-    "ATH results 0 degree norm/250917asro68/ABEC_FreeStanding/250917asro68.msh"
-)
+_ASRO68_MESH_OVERRIDE = os.environ.get("HORNLAB_ASRO68_MESH")
+ASRO68_MESH = Path(_ASRO68_MESH_OVERRIDE).expanduser() if _ASRO68_MESH_OVERRIDE else None
 
 _VALIDATION_DIR_OVERRIDE = os.environ.get("HORNLAB_VALIDATION_ARTIFACTS")
 VALIDATION_DIR = (
     Path(_VALIDATION_DIR_OVERRIDE).expanduser()
     if _VALIDATION_DIR_OVERRIDE
-    else Path(__file__).resolve().parents[2]
-    / "hornlab-research"
-    / "docs"
-    / "research"
-    / "260517-abec-vs-wg-validation-artifacts"
+    else None
 )
 
 
 def _require_asro68_mesh() -> Path:
-    if not ASRO68_MESH.exists():
-        pytest.skip(f"ASRO68 ABEC reference mesh not found: {ASRO68_MESH}")
+    if ASRO68_MESH is None:
+        pytest.skip("set HORNLAB_ASRO68_MESH to run the external ASRO68 validation tests")
+    if not ASRO68_MESH.is_file():
+        pytest.skip(f"HORNLAB_ASRO68_MESH does not name a file: {ASRO68_MESH}")
     return ASRO68_MESH
 
 
@@ -68,8 +64,10 @@ def test_asro68_mesh_loads_full_stitched_abec_surface():
 
 
 def test_asro68_validation_artifacts_match_abec_key_angles_all_planes():
-    if not VALIDATION_DIR.exists():
-        pytest.skip(f"Validation artifacts dir missing: {VALIDATION_DIR}")
+    if VALIDATION_DIR is None:
+        pytest.skip("set HORNLAB_VALIDATION_ARTIFACTS to run external artifact validation")
+    if not VALIDATION_DIR.is_dir():
+        pytest.skip(f"HORNLAB_VALIDATION_ARTIFACTS is not a directory: {VALIDATION_DIR}")
 
     hl_npz = VALIDATION_DIR / "hornlab_postfix_asro68.npz"
     abec_npz = VALIDATION_DIR / "abec_baseline_asro68.npz"
@@ -122,7 +120,7 @@ def test_loaded_mesh_is_not_reloaded_when_mesh_scale_is_set(monkeypatch):
     ],
 )
 def test_asro68_100hz_hplane_matches_pinned_origin_smoke(origin, expected_db):
-    _require_asro68_mesh()
+    mesh_path = _require_asro68_mesh()
     try:
         configure_opencl("cpu")
     except Exception as exc:
@@ -140,7 +138,7 @@ def test_asro68_100hz_hplane_matches_pinned_origin_smoke(origin, expected_db):
         mesh_scale=0.001,
     )
 
-    result = solve_frequencies(ASRO68_MESH, [100.0], config)
+    result = solve_frequencies(mesh_path, [100.0], config)
 
     assert result.mesh_info.n_vertices == 4554
     assert result.mesh_info.n_triangles == 9104
