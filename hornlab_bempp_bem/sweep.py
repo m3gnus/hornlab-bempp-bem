@@ -40,14 +40,38 @@ def _normalized_spl_db(
     pressure: NDArray[np.complex128],
     on_axis_idx: int,
 ) -> NDArray[np.float64]:
-    """Convert pressure to SPL and normalize the on-axis value to zero."""
+    """Convert pressure to SPL and normalize its last axis to zero on-axis."""
     amplitudes = np.abs(pressure)
     spl_raw = np.full(amplitudes.shape, -120.0, dtype=np.float64)
     audible = amplitudes > 1e-15
     spl_raw[audible] = 20.0 * np.log10(
         amplitudes[audible] / REFERENCE_PRESSURE
     )
-    return spl_raw - spl_raw[on_axis_idx]
+    return spl_raw - spl_raw[..., on_axis_idx, None]
+
+
+def _evaluate_observation_planes(
+    p1_space,
+    dp0_space,
+    pressure_on_surface,
+    neumann_data,
+    k_real: float,
+    obs_points: NDArray[np.float64],
+    op_kwargs: dict,
+    on_axis_idx: int,
+) -> tuple[NDArray[np.complex128], NDArray[np.float64]]:
+    """Evaluate all observation planes in one Bempp potential operation."""
+    n_planes, n_angles, _ = obs_points.shape
+    pressure = _evaluate_far_field(
+        p1_space,
+        dp0_space,
+        pressure_on_surface,
+        neumann_data,
+        k_real,
+        obs_points.reshape(n_planes * n_angles, 3),
+        op_kwargs,
+    ).reshape(n_planes, n_angles)
+    return pressure, _normalized_spl_db(pressure, on_axis_idx)
 
 
 def _evaluate_directivity(
@@ -80,16 +104,16 @@ def _evaluate_directivity(
         p1 = fr.pressure_on_surface.space
         dp0 = fr.neumann_data.space
 
-        for pi in range(n_planes):
-            pts = obs_points[pi]  # (N_angles, 3)
-            p_complex = _evaluate_far_field(
-                p1, dp0,
-                fr.pressure_on_surface,
-                fr.neumann_data,
-                k_real, pts, op_kwargs,
-            )
-            pressure[fi, pi, :] = p_complex
-            spl[fi, pi, :] = _normalized_spl_db(p_complex, on_axis_idx)
+        pressure[fi], spl[fi] = _evaluate_observation_planes(
+            p1,
+            dp0,
+            fr.pressure_on_surface,
+            fr.neumann_data,
+            k_real,
+            obs_points,
+            op_kwargs,
+            on_axis_idx,
+        )
 
     return pressure, spl
 
@@ -168,22 +192,16 @@ def run_sweep_serial(
         # so the caller can act on partial results as they stream in.
         if has_callback:
             k_real = 2.0 * np.pi * fr.frequency_hz / SPEED_OF_SOUND
-            n_planes = obs_points.shape[0]
-            n_angles = obs_points.shape[1]
-            per_freq_pressure = np.zeros(
-                (n_planes, n_angles), dtype=np.complex128,
+            per_freq_pressure, per_freq_spl = _evaluate_observation_planes(
+                p1_space,
+                dp0_space,
+                fr.pressure_on_surface,
+                fr.neumann_data,
+                k_real,
+                obs_points,
+                _ff_op_kwargs,
+                on_axis_idx,
             )
-            per_freq_spl = np.full((n_planes, n_angles), -120.0, dtype=np.float64)
-            for pi in range(n_planes):
-                p_complex = _evaluate_far_field(
-                    p1_space, dp0_space,
-                    fr.pressure_on_surface, fr.neumann_data,
-                    k_real, obs_points[pi], _ff_op_kwargs,
-                )
-                per_freq_pressure[pi, :] = p_complex
-                per_freq_spl[pi, :] = _normalized_spl_db(
-                    p_complex, on_axis_idx,
-                )
             callback_pressure_rows.append(per_freq_pressure)
             callback_spl_rows.append(per_freq_spl)
             log_entry["observation_spl_db"] = per_freq_spl
@@ -436,14 +454,15 @@ def _worker_solve_chunk(
         })
 
         k_real = 2.0 * np.pi * freq / SPEED_OF_SOUND
-        for pi in range(n_planes):
-            pts = obs_points[pi]
-            p_complex = _evaluate_far_field(
-                p1_space, dp0_space,
-                fr.pressure_on_surface, fr.neumann_data,
-                k_real, pts, op_kwargs,
-            )
-            pressure[i, pi, :] = p_complex
-            spl[i, pi, :] = _normalized_spl_db(p_complex, on_axis_idx)
+        pressure[i], spl[i] = _evaluate_observation_planes(
+            p1_space,
+            dp0_space,
+            fr.pressure_on_surface,
+            fr.neumann_data,
+            k_real,
+            obs_points,
+            op_kwargs,
+            on_axis_idx,
+        )
 
     return pressure, spl, impedance, log_entries, surface_pressure

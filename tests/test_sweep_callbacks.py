@@ -102,6 +102,24 @@ class TestOnAxisIndex:
 
         np.testing.assert_allclose(spl, [-120.0, 0.0, 20.0])
 
+    def test_spl_normalisation_handles_multiple_planes(self):
+        from hornlab_bempp_bem.sweep import _normalized_spl_db
+
+        pressure = np.array([
+            [1.0, 2.0, 4.0],
+            [8.0, 4.0, 2.0],
+        ], dtype=np.complex128)
+
+        spl = _normalized_spl_db(pressure, on_axis_idx=1)
+
+        np.testing.assert_allclose(
+            spl,
+            [
+                [-20.0 * np.log10(2.0), 0.0, 20.0 * np.log10(2.0)],
+                [20.0 * np.log10(2.0), 0.0, -20.0 * np.log10(2.0)],
+            ],
+        )
+
     def test_on_axis_at_nonzero_angle_min(self):
         angles = np.array([-90.0, -45.0, 0.0, 45.0, 90.0])
         on_axis_idx = int(np.argmin(np.abs(angles)))
@@ -132,6 +150,42 @@ class TestOnAxisIndex:
         assert spl_norm[on_axis_idx] == 0.0
         assert np.all(spl_norm[:on_axis_idx] < 0.0)
         assert np.all(spl_norm[on_axis_idx + 1:] < 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Batched observation-plane evaluation
+# ---------------------------------------------------------------------------
+
+class TestBatchedObservationEvaluation:
+
+    def test_all_planes_share_one_far_field_evaluation(self):
+        from hornlab_bempp_bem.sweep import _evaluate_observation_planes
+
+        obs_points = np.arange(3 * 4 * 3, dtype=np.float64).reshape(3, 4, 3)
+        flat_pressure = np.arange(1, 13, dtype=np.float64).astype(np.complex128)
+
+        with patch(
+            f"{_SWEEP}._evaluate_far_field",
+            return_value=flat_pressure,
+        ) as evaluate_far_field:
+            pressure, spl = _evaluate_observation_planes(
+                MagicMock(),
+                MagicMock(),
+                MagicMock(),
+                MagicMock(),
+                2.5,
+                obs_points,
+                {},
+                on_axis_idx=1,
+            )
+
+        assert evaluate_far_field.call_count == 1
+        np.testing.assert_array_equal(
+            evaluate_far_field.call_args.args[5],
+            obs_points.reshape(-1, 3),
+        )
+        np.testing.assert_array_equal(pressure, flat_pressure.reshape(3, 4))
+        np.testing.assert_allclose(spl[:, 1], 0.0)
 
 
 # ---------------------------------------------------------------------------
