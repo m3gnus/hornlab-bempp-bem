@@ -349,6 +349,39 @@ def test_load_mesh_require_closed(tmp_path):
         load_mesh(nonmanifold, require_closed=True)
 
 
+def test_load_mesh_uses_all_triangle_blocks_with_aligned_tags(
+    monkeypatch, tmp_path
+):
+    import meshio
+
+    from hornlab_bempp_bem.mesh import load_mesh
+
+    verts, tris = _tetrahedron()
+    mesh = meshio.Mesh(
+        verts,
+        [
+            ("triangle", tris[:2]),
+            ("line", np.array([[0, 1]], dtype=np.int32)),
+            ("triangle", tris[2:]),
+        ],
+        cell_data={
+            "gmsh:physical": [
+                np.array([1, 1], dtype=np.int32),
+                np.array([9], dtype=np.int32),
+                np.array([2, 3], dtype=np.int32),
+            ],
+        },
+    )
+    monkeypatch.setattr(meshio, "read", lambda _path: mesh)
+    mesh_path = tmp_path / "multi-block.msh"
+    mesh_path.touch()
+
+    loaded = load_mesh(mesh_path, validate=False, merge_tol=0)
+
+    np.testing.assert_array_equal(loaded.grid.elements.T, tris)
+    np.testing.assert_array_equal(loaded.physical_tags, [1, 1, 2, 3])
+
+
 def test_load_mesh_reuses_edge_incidence_for_validation(monkeypatch, tmp_path):
     import hornlab_bempp_bem.mesh as mesh_module
 

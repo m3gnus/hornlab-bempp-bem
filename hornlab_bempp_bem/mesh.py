@@ -54,13 +54,17 @@ def load_mesh(
         raise MeshError(f"Mesh file not found: {path}")
 
     mesh = meshio.read(path)
-    tri_key = "triangle" if "triangle" in mesh.cells_dict else "triangle3"
-    if tri_key not in mesh.cells_dict:
+    triangles = np.asarray(mesh.get_cells_type("triangle"), dtype=np.int32)
+    if not triangles.size:
         raise MeshError("No triangles found in mesh")
-
-    triangles = np.asarray(mesh.cells_dict[tri_key], dtype=np.int32)
     verts = np.asarray(mesh.points, dtype=np.float64) * scale
-    phys_tags = _extract_physical_tags(mesh, tri_key)
+    try:
+        phys_tags = np.asarray(
+            mesh.get_cell_data("gmsh:physical", "triangle"),
+            dtype=np.int32,
+        )
+    except (KeyError, ValueError) as exc:
+        raise MeshError("Mesh file has no triangle physical-group tags") from exc
     phys_group_names = {
         int(data[0]): name
         for name, data in mesh.field_data.items()
@@ -121,13 +125,6 @@ def load_mesh(
     )
 
     return LoadedMesh(grid=grid, physical_tags=phys_tags, info=info)
-
-
-def _extract_physical_tags(mesh, tri_key: str) -> NDArray[np.int32]:
-    for key, by_type in mesh.cell_data_dict.items():
-        if "physical" in key and tri_key in by_type:
-            return np.asarray(by_type[tri_key], dtype=np.int32)
-    raise MeshError("Mesh file has no triangle physical-group tags")
 
 
 def _merge_duplicate_vertices(
