@@ -61,7 +61,11 @@ def load_mesh(
     triangles = np.asarray(mesh.cells_dict[tri_key], dtype=np.int32)
     verts = np.asarray(mesh.points, dtype=np.float64) * scale
     phys_tags = _extract_physical_tags(mesh, tri_key)
-    phys_group_names = _extract_physical_names(path)
+    phys_group_names = {
+        int(data[0]): name
+        for name, data in mesh.field_data.items()
+        if int(data[1]) == 2
+    }
 
     verts, triangles, merged_vertices = _merge_duplicate_vertices(
         verts, triangles, merge_tol,
@@ -124,32 +128,6 @@ def _extract_physical_tags(mesh, tri_key: str) -> NDArray[np.int32]:
         if "physical" in key and tri_key in by_type:
             return np.asarray(by_type[tri_key], dtype=np.int32)
     raise MeshError("Mesh file has no triangle physical-group tags")
-
-
-def _extract_physical_names(path: Path) -> dict[int, str]:
-    names: dict[int, str] = {}
-    in_block = False
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for raw in handle:
-                line = raw.strip()
-                if line == "$PhysicalNames":
-                    in_block = True
-                    continue
-                if line == "$EndPhysicalNames":
-                    break
-                if not in_block:
-                    continue
-                parts = line.split(maxsplit=2)
-                if len(parts) < 3 or not parts[0].isdigit():
-                    continue
-                dim = int(parts[0])
-                tag = int(parts[1])
-                if dim == 2:
-                    names[tag] = parts[2].strip().strip('"')
-    except OSError:
-        return names
-    return names
 
 
 def _merge_duplicate_vertices(

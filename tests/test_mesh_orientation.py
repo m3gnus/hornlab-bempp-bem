@@ -302,6 +302,11 @@ def _tet_msh_text(*, drop_wall_face: bool, duplicate_wall_face: bool = False) ->
         "$MeshFormat",
         "2.2 0 8",
         "$EndMeshFormat",
+        "$PhysicalNames",
+        "2",
+        '2 1 "rigid wall"',
+        '2 2 "velocity source"',
+        "$EndPhysicalNames",
         "$Nodes",
         "4",
         "1 0 0 0",
@@ -323,7 +328,8 @@ def test_load_mesh_require_closed(tmp_path):
 
     closed = tmp_path / "tet.msh"
     closed.write_text(_tet_msh_text(drop_wall_face=False))
-    load_mesh(closed, require_closed=True)
+    loaded = load_mesh(closed, require_closed=True)
+    assert loaded.info.physical_groups == {1: "rigid wall", 2: "velocity source"}
 
     leaking = tmp_path / "tet-open.msh"
     leaking.write_text(_tet_msh_text(drop_wall_face=True))
