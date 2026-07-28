@@ -340,16 +340,25 @@ class TestSurfacePressureAvg:
             source_motion=SourceMotion.AXIAL,
             observation=ObservationConfig(planes=["horizontal"], angle_count=5),
         )
+        axial_element_scale = np.arange(
+            len(_make_mesh().physical_tags), dtype=np.float64,
+        )
 
         with patches["spaces"], patches["solve"] as solve_mock, patches["pavg"], \
-             patches["ff"], patches["op_kw"], patches["dir"]:
+             patches["ff"], patches["op_kw"], patches["dir"], \
+             patch(
+                 f"{_SWEEP}._build_axial_element_scale",
+                 return_value=axial_element_scale,
+             ) as build_scale:
             run_sweep_serial(
                 _make_mesh(), np.array([500.0, 1000.0]), frame, config,
             )
 
+        build_scale.assert_called_once()
         assert solve_mock.call_count == 2
         for call in solve_mock.call_args_list:
             np.testing.assert_array_equal(call.kwargs["source_axis"], frame.axis)
+            assert call.kwargs["axial_element_scale"] is axial_element_scale
 
     def test_serial_sweep_validates_closed_mesh_once(self):
         from hornlab_bempp_bem.sweep import run_sweep_serial
@@ -413,10 +422,16 @@ class TestSurfacePressureAvg:
         source_axis = np.array([0.0, 1.0, 0.0])
         config = SolveConfig(
             assembly_backend="numba",
+            source_motion=SourceMotion.AXIAL,
             observation=ObservationConfig(planes=["horizontal"], angle_count=5),
         )
+        axial_element_scale = np.array([0.25, 1.0])
         with patch("bempp_cl.api.Grid", return_value=MagicMock()), \
              patch(f"{_SWEEP}._setup_function_spaces", return_value=(MagicMock(), MagicMock())), \
+             patch(
+                 f"{_SWEEP}._build_axial_element_scale",
+                 return_value=axial_element_scale,
+             ) as build_scale, \
              patch(f"{_SWEEP}.solve_single_frequency", side_effect=lambda *a, **k: _fake_frequency_result(float(a[2]))) as solve_mock, \
              patch(f"{_SWEEP}.compute_surface_pressure_avg", return_value={2: 100.0 + 50j}), \
              patch(f"{_SWEEP}._evaluate_far_field", return_value=np.ones(5, dtype=np.complex128)), \
@@ -437,6 +452,7 @@ class TestSurfacePressureAvg:
         np.testing.assert_allclose(
             surface_pressure[2], [100.0 + 50j, 100.0 + 50j]
         )
+        build_scale.assert_called_once()
         assert all(
             call.kwargs["closed_mesh_validated"] is True
             for call in solve_mock.call_args_list
@@ -445,6 +461,7 @@ class TestSurfacePressureAvg:
             np.testing.assert_array_equal(
                 call.kwargs["source_axis"], source_axis,
             )
+            assert call.kwargs["axial_element_scale"] is axial_element_scale
 
     def test_parallel_result_preserves_worker_surface_pressure_order(self):
         from hornlab_bempp_bem.sweep import run_sweep_parallel

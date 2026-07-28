@@ -450,6 +450,34 @@ class TestAxialElementScale:
 
 class TestAxialNeumannData:
 
+    def test_precomputed_element_scale_skips_geometry_rebuild(self):
+        from hornlab_bempp_bem.bie import _build_neumann_coefficients
+
+        tags = np.array([2, 2], dtype=np.int32)
+        omega = 2 * np.pi * 1000.0
+        config = SolveConfig(
+            velocity_sources={2: 1.0},
+            velocity_mode=VelocityMode.VELOCITY,
+            source_motion=SourceMotion.AXIAL,
+        )
+        axial_element_scale = np.array([0.25, 1.0])
+
+        with patch(
+            "hornlab_bempp_bem.bie._build_axial_element_scale",
+            side_effect=AssertionError("geometry projection was rebuilt"),
+        ):
+            coeffs = _build_neumann_coefficients(
+                SimpleNamespace(global_dof_count=2),
+                tags,
+                omega,
+                config,
+                np.complex128,
+                axial_element_scale=axial_element_scale,
+            )
+
+        expected = 1j * config.air_density * omega * axial_element_scale
+        np.testing.assert_allclose(coeffs, expected, rtol=1e-12)
+
     def test_robin_driver_coefficients_use_shared_frame_axis(self):
         from hornlab_bempp_bem.bie import _build_neumann_coefficients
 

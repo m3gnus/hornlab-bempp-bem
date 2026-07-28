@@ -12,13 +12,14 @@ from ._constants import REFERENCE_PRESSURE, SPEED_OF_SOUND
 from .backends import resolve_assembly_backend
 from .bie import (
     FrequencyResult,
+    _build_axial_element_scale,
     _evaluate_far_field,
     _operator_kwargs,
     _setup_function_spaces,
     compute_surface_pressure_avg,
     solve_single_frequency,
 )
-from .config import SolveConfig
+from .config import SolveConfig, SourceMotion
 from .mesh import (
     LoadedMesh,
     _require_closed_surface,
@@ -154,6 +155,14 @@ def run_sweep_serial(
     p1_space, dp0_space = _setup_function_spaces(mesh.grid)
 
     source_tags = list(config.velocity_sources.keys())
+    axial_element_scale = None
+    if config.source_motion == SourceMotion.AXIAL:
+        axial_element_scale = _build_axial_element_scale(
+            mesh.grid,
+            mesh.physical_tags,
+            source_tags,
+            frame.axis,
+        )
     freq_results: list[FrequencyResult] = []
     surface_pavg: dict[int, list[complex]] = {tag: [] for tag in source_tags}
 
@@ -176,6 +185,7 @@ def run_sweep_serial(
             p1_space=p1_space,
             dp0_space=dp0_space,
             source_axis=frame.axis,
+            axial_element_scale=axial_element_scale,
             closed_mesh_validated=True,
         )
         freq_results.append(fr)
@@ -407,6 +417,14 @@ def _worker_solve_chunk(
     spl = np.full((len(frequencies), n_planes, n_angles), -120.0)
     impedance = np.zeros(len(frequencies), dtype=np.complex128)
     source_tags = list(config.velocity_sources.keys())
+    axial_element_scale = None
+    if config.source_motion == SourceMotion.AXIAL:
+        axial_element_scale = _build_axial_element_scale(
+            grid,
+            physical_tags,
+            source_tags,
+            source_axis,
+        )
     surface_pressure = {
         tag: np.zeros(len(frequencies), dtype=np.complex128)
         for tag in source_tags
@@ -425,6 +443,7 @@ def _worker_solve_chunk(
             p1_space=p1_space,
             dp0_space=dp0_space,
             source_axis=source_axis,
+            axial_element_scale=axial_element_scale,
             closed_mesh_validated=True,
         )
         impedance[i] = fr.impedance

@@ -137,6 +137,7 @@ def _build_neumann_data(
     precision: str = "single",
     grid=None,
     source_axis: NDArray[np.float64] | None = None,
+    axial_element_scale: NDArray[np.float64] | None = None,
 ) -> object:
     """Construct Neumann boundary condition: dp/dn = i*rho*omega*v_n.
 
@@ -157,6 +158,7 @@ def _build_neumann_data(
         dtype,
         grid=grid,
         source_axis=source_axis,
+        axial_element_scale=axial_element_scale,
     )
     return bempp_api.GridFunction(dp0_space, coefficients=coeffs)
 
@@ -205,6 +207,7 @@ def _build_neumann_coefficients(
     excluded_tags=(),
     grid=None,
     source_axis: NDArray[np.float64] | None = None,
+    axial_element_scale: NDArray[np.float64] | None = None,
 ) -> NDArray:
     """Build source Neumann coefficients, optionally excluding physical tags.
 
@@ -213,13 +216,13 @@ def _build_neumann_coefficients(
     """
     coeffs = np.zeros(dp0_space.global_dof_count, dtype=dtype)
     air_density = config.air_density
-    axial_scale = None
     if config.source_motion == SourceMotion.AXIAL:
-        if grid is None or source_axis is None:
-            raise ValueError("axial source motion requires a grid and source_axis")
-        axial_scale = _build_axial_element_scale(
-            grid, physical_tags, config.velocity_sources.keys(), source_axis
-        )
+        if axial_element_scale is None:
+            if grid is None or source_axis is None:
+                raise ValueError("axial source motion requires a grid and source_axis")
+            axial_element_scale = _build_axial_element_scale(
+                grid, physical_tags, config.velocity_sources.keys(), source_axis
+            )
     for tag, weight in config.velocity_sources.items():
         if tag in excluded_tags:
             continue
@@ -235,8 +238,8 @@ def _build_neumann_coefficients(
             v_n = weight / (-1j * omega) if omega > 0 else 0.0
         g_val = 1j * air_density * omega * v_n
         dofs = np.where(mask)[0]
-        if axial_scale is not None:
-            coeffs[dofs] = g_val * axial_scale[dofs]
+        if axial_element_scale is not None:
+            coeffs[dofs] = g_val * axial_element_scale[dofs]
         else:
             coeffs[dofs] = g_val
     return coeffs
@@ -252,6 +255,7 @@ def _assemble_and_solve_impedance(
     config: SolveConfig,
     op_kwargs_low: dict,
     source_axis: NDArray[np.float64] | None = None,
+    axial_element_scale: NDArray[np.float64] | None = None,
 ):
     """Direct (non-iterative) solve for the BIE with Robin BCs.
 
@@ -319,6 +323,7 @@ def _assemble_and_solve_impedance(
         excluded_tags=config.impedance_sources,
         grid=grid,
         source_axis=source_axis,
+        axial_element_scale=axial_element_scale,
     )
     rhs_vec = V_mat @ g_drv
 
@@ -501,6 +506,7 @@ def solve_single_frequency(
     dp0_space=None,
     source_axis: NDArray[np.float64] | None = None,
     closed_mesh_validated: bool = False,
+    axial_element_scale: NDArray[np.float64] | None = None,
 ) -> FrequencyResult:
     """Solve the BEM problem at a single frequency.
 
@@ -568,7 +574,9 @@ def solve_single_frequency(
         impedance_config = replace(config, impedance_sources=active_impedance)
         p_surface, neumann_fun, iterations, converged = _assemble_and_solve_impedance(
             grid, p1_space, dp0_space, physical_tags,
-            k, omega, impedance_config, op_kwargs_low, source_axis=source_axis,
+            k, omega, impedance_config, op_kwargs_low,
+            source_axis=source_axis,
+            axial_element_scale=axial_element_scale,
         )
     else:
         neumann_fun = _build_neumann_data(
@@ -579,6 +587,7 @@ def solve_single_frequency(
             config.precision,
             grid=grid,
             source_axis=source_axis,
+            axial_element_scale=axial_element_scale,
         )
         p_surface, iterations, converged = _assemble_and_solve(
             grid, p1_space, dp0_space, neumann_fun,
