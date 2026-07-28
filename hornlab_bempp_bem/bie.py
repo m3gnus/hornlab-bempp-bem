@@ -181,6 +181,19 @@ def _build_p1_to_dp0_projection(p1_space, dp0_space):
     return sp.csr_matrix((data, (rows, cols)), shape=(n_dp0, n_p1))
 
 
+def _build_robin_contribution(
+    single_layer_matrix: NDArray,
+    beta_vec: NDArray,
+    p1_to_dp0,
+    k: complex,
+) -> NDArray:
+    """Build ``i*k*V*diag(beta)*M`` without densifying sparse ``M``."""
+    import scipy.sparse as sp
+
+    weighted_projection = sp.diags(beta_vec) @ p1_to_dp0
+    return (1j * k) * (single_layer_matrix @ weighted_projection)
+
+
 def _build_neumann_coefficients(
     dp0_space,
     physical_tags: NDArray[np.int32],
@@ -255,7 +268,6 @@ def _assemble_and_solve_impedance(
     """
     import bempp_cl.api as bempp_api
     import scipy.linalg
-    import scipy.sparse as sp
 
     if config.formulation is BIEFormulation.BURTON_MILLER:
         raise NotImplementedError(
@@ -287,13 +299,12 @@ def _assemble_and_solve_impedance(
     for tag, beta in config.impedance_sources.items():
         mask = physical_tags == tag
         beta_vec[np.where(mask)[0]] = complex(beta)
-    beta_diag = sp.diags(beta_vec)
 
     # P1 → DP0 projection (sparse)
     M_proj = _build_p1_to_dp0_projection(p1_space, dp0_space)
 
     # Robin contribution: −i·k · V · diag(β) · M_proj  (n_p1 × n_p1 dense)
-    robin = (1j * k) * (V_mat @ (beta_diag @ M_proj).toarray())
+    robin = _build_robin_contribution(V_mat, beta_vec, M_proj, k)
     lhs_full = A_mat - robin
 
     # RHS = V · g_drv, with g_drv zero on impedance tags

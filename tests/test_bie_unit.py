@@ -295,6 +295,54 @@ class TestComputeSurfacePressureAvg:
 
 
 # ---------------------------------------------------------------------------
+# Robin contribution assembly
+# ---------------------------------------------------------------------------
+
+class TestRobinContribution:
+
+    def test_sparse_projection_is_not_densified(self):
+        import scipy.sparse as sp
+
+        from hornlab_bempp_bem.bie import _build_robin_contribution
+
+        single_layer = np.array(
+            [
+                [1.0 + 2.0j, 3.0 - 1.0j, -2.0 + 0.5j],
+                [0.5 - 0.25j, -1.0 + 4.0j, 2.0 + 3.0j],
+            ],
+            dtype=np.complex128,
+        )
+        beta = np.array([0.05, 0.0, 0.2j], dtype=np.complex128)
+        projection_dense = np.array(
+            [
+                [0.5, 0.5],
+                [1.0, 0.0],
+                [0.25, 0.75],
+            ],
+            dtype=np.float64,
+        )
+        projection = sp.csr_matrix(projection_dense)
+        k = 2.5 + 0.1j
+        expected = (
+            (1j * k)
+            * single_layer
+            @ np.diag(beta)
+            @ projection_dense
+        )
+
+        with patch.object(
+            sp.csr_matrix,
+            "toarray",
+            side_effect=AssertionError("sparse projection was densified"),
+        ):
+            actual = _build_robin_contribution(
+                single_layer, beta, projection, k,
+            )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-15, atol=1e-15)
+
+
+# ---------------------------------------------------------------------------
 # Axial (rigid-piston) source motion (parity with hornlab-metal-bem)
 # ---------------------------------------------------------------------------
 
