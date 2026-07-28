@@ -351,7 +351,7 @@ class TestAxialElementScale:
 class TestAxialNeumannData:
 
     def test_robin_driver_coefficients_use_shared_frame_axis(self):
-        from hornlab_bempp_bem.bie import _build_driver_neumann_coeffs
+        from hornlab_bempp_bem.bie import _build_neumann_coefficients
 
         theta = np.deg2rad(45.0)
         grid = _two_tag_off_axis_grid(theta)
@@ -364,12 +364,13 @@ class TestAxialNeumannData:
             impedance_sources={1: 0.05},
         )
 
-        coeffs = _build_driver_neumann_coeffs(
+        coeffs = _build_neumann_coefficients(
             SimpleNamespace(global_dof_count=2),
             tags,
             omega,
             config,
             np.complex128,
+            excluded_tags=config.impedance_sources,
             grid=grid,
             source_axis=_FRAME_AXIS,
         )
@@ -378,6 +379,29 @@ class TestAxialNeumannData:
             [1.0, np.cos(theta)]
         )
         np.testing.assert_allclose(coeffs, expected, rtol=1e-12)
+
+    def test_robin_driver_coefficients_exclude_impedance_tags(self):
+        from hornlab_bempp_bem.bie import _build_neumann_coefficients
+
+        tags = np.array([2, 3], dtype=np.int32)
+        omega = 2 * np.pi * 1000.0
+        config = SolveConfig(
+            velocity_sources={2: 1.0, 3: 1.0},
+            velocity_mode=VelocityMode.VELOCITY,
+            impedance_sources={3: 0.05},
+        )
+
+        coeffs = _build_neumann_coefficients(
+            SimpleNamespace(global_dof_count=2),
+            tags,
+            omega,
+            config,
+            np.complex128,
+            excluded_tags=config.impedance_sources,
+        )
+
+        expected = 1j * config.air_density * omega
+        np.testing.assert_allclose(coeffs, [expected, 0.0], rtol=1e-12)
 
     def test_axial_flat_disc_matches_normal(self):
         """A flat disc under axial reproduces the uniform-normal coefficients."""

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
@@ -149,40 +149,15 @@ def _build_neumann_data(
     import bempp_cl.api as bempp_api
 
     dtype = np.complex64 if precision == "single" else np.complex128
-    coeffs = np.zeros(dp0_space.global_dof_count, dtype=dtype)
-
-    air_density = config.air_density
-    axial_scale = None
-    if config.source_motion == SourceMotion.AXIAL:
-        if grid is None or source_axis is None:
-            raise ValueError("axial source motion requires a grid and source_axis")
-        axial_scale = _build_axial_element_scale(
-            grid, physical_tags, config.velocity_sources.keys(), source_axis
-        )
-
-    for tag, weight in config.velocity_sources.items():
-        mask = physical_tags == tag
-        if not np.any(mask):
-            continue
-
-        v_n = weight
-        if config.velocity_mode is VelocityMode.ACCELERATION:
-            # Under this package's e^{-i omega t} convention, a*cos(omega t)
-            # integrates to v = a/(-i omega), so q = i rho omega v = -rho a
-            # (momentum: dp/dn = -rho a_n). Matches metal-bem; cross-validated
-            # against ABEC3 absolute pressure (2026-07-09).
-            v_n = weight / (-1j * omega) if omega > 0 else 0.0
-
-        # Neumann data: dp/dn = i * rho * omega * v_n
-        g_val = 1j * air_density * omega * v_n
-        dofs = np.where(mask)[0]
-        if axial_scale is not None:
-            # Per-face piston projection scales g_val identically in velocity and
-            # acceleration modes (both carry one factor of v_n).
-            coeffs[dofs] = g_val * axial_scale[dofs]
-        else:
-            coeffs[dofs] = g_val
-
+    coeffs = _build_neumann_coefficients(
+        dp0_space,
+        physical_tags,
+        omega,
+        config,
+        dtype,
+        grid=grid,
+        source_axis=source_axis,
+    )
     return bempp_api.GridFunction(dp0_space, coefficients=coeffs)
 
 
@@ -206,25 +181,23 @@ def _build_p1_to_dp0_projection(p1_space, dp0_space):
     return sp.csr_matrix((data, (rows, cols)), shape=(n_dp0, n_p1))
 
 
-def _build_driver_neumann_coeffs(
+def _build_neumann_coefficients(
     dp0_space,
     physical_tags: NDArray[np.int32],
     omega: float,
     config: SolveConfig,
     dtype: type,
+    excluded_tags=(),
     grid=None,
     source_axis: NDArray[np.float64] | None = None,
 ) -> NDArray:
-    """Build Neumann coefficients with velocity sources only — zero on
-    impedance tags (Robin BCs are folded into the LHS instead).
+    """Build source Neumann coefficients, optionally excluding physical tags.
 
     Honors ``config.source_motion == "axial"`` (rigid piston) when ``grid`` is
-    supplied, exactly like ``_build_neumann_data``; the default normal path is
-    unchanged.
+    supplied; the default normal path is unchanged.
     """
     coeffs = np.zeros(dp0_space.global_dof_count, dtype=dtype)
     air_density = config.air_density
-    impedance_tag_set = set(config.impedance_sources.keys())
     axial_scale = None
     if config.source_motion == SourceMotion.AXIAL:
         if grid is None or source_axis is None:
@@ -233,16 +206,17 @@ def _build_driver_neumann_coeffs(
             grid, physical_tags, config.velocity_sources.keys(), source_axis
         )
     for tag, weight in config.velocity_sources.items():
-        if tag in impedance_tag_set:
-            # Don't double-count: impedance tags get their own BC
+        if tag in excluded_tags:
             continue
         mask = physical_tags == tag
         if not np.any(mask):
             continue
         v_n = weight
         if config.velocity_mode is VelocityMode.ACCELERATION:
-            # v = a/(-i omega) under e^{-i omega t}; q = -rho a. See the
-            # matching comment in _build_neumann_data.
+            # Under this package's e^{-i omega t} convention, a*cos(omega t)
+            # integrates to v = a/(-i omega), so q = i rho omega v = -rho a
+            # (momentum: dp/dn = -rho a_n). Matches metal-bem; cross-validated
+            # against ABEC3 absolute pressure (2026-07-09).
             v_n = weight / (-1j * omega) if omega > 0 else 0.0
         g_val = 1j * air_density * omega * v_n
         dofs = np.where(mask)[0]
@@ -323,12 +297,13 @@ def _assemble_and_solve_impedance(
     lhs_full = A_mat - robin
 
     # RHS = V · g_drv, with g_drv zero on impedance tags
-    g_drv = _build_driver_neumann_coeffs(
+    g_drv = _build_neumann_coefficients(
         dp0_space,
         physical_tags,
         omega,
         config,
         dtype_solve,
+        excluded_tags=config.impedance_sources,
         grid=grid,
         source_axis=source_axis,
     )
@@ -564,9 +539,8 @@ def solve_single_frequency(
     n_tris = grid.number_of_elements
 
     # Impedance / Robin BC: filter to tags actually present in the mesh.
-    has_impedance = bool(config.impedance_sources)
     active_impedance: dict[int, complex] = {}
-    if has_impedance:
+    if config.impedance_sources:
         for tag, beta in config.impedance_sources.items():
             mask = physical_tags == tag
             if not np.any(mask):
@@ -576,13 +550,9 @@ def solve_single_frequency(
                 )
                 continue
             active_impedance[tag] = beta
-    has_impedance = bool(active_impedance)
 
-    if has_impedance:
-        impedance_config = SolveConfig(**{
-            **{k_: getattr(config, k_) for k_ in config.__dataclass_fields__},
-            "impedance_sources": active_impedance,
-        })
+    if active_impedance:
+        impedance_config = replace(config, impedance_sources=active_impedance)
         p_surface, neumann_fun, iterations, converged = _assemble_and_solve_impedance(
             grid, p1_space, dp0_space, physical_tags,
             k, omega, impedance_config, op_kwargs_low, source_axis=source_axis,
@@ -608,7 +578,7 @@ def solve_single_frequency(
     )
 
     elapsed = time.time() - t0
-    if has_impedance:
+    if active_impedance:
         logger.info(
             "%.1f Hz: solved in %.2fs (direct Robin BC)",
             frequency_hz, elapsed,
