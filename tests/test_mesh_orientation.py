@@ -229,6 +229,26 @@ def _half_cube() -> tuple[np.ndarray, np.ndarray]:
     return verts, tris
 
 
+def _quarter_cube() -> tuple[np.ndarray, np.ndarray]:
+    # Unit-cube surface with the x=0 and y=0 faces omitted. Its open edges
+    # therefore require both the yz and xz symmetry planes.
+    verts, _ = _half_cube()
+    tris = np.array(
+        [
+            [0, 3, 2],
+            [0, 2, 1],  # z=0
+            [4, 5, 6],
+            [4, 6, 7],  # z=1
+            [3, 7, 6],
+            [3, 6, 2],  # y=1
+            [1, 2, 6],
+            [1, 6, 5],  # x=1
+        ],
+        dtype=np.int32,
+    )
+    return verts, tris
+
+
 def test_open_boundary_edges_closed_vs_open():
     from hornlab_bempp_bem.mesh import open_boundary_edges
 
@@ -242,6 +262,13 @@ def test_detect_reduced_symmetry_plane_flags_half_cube():
 
     verts, tris = _half_cube()
     assert detect_reduced_symmetry_plane(verts, tris) == "yz"
+
+
+def test_detect_reduced_symmetry_plane_flags_quarter_cube():
+    from hornlab_bempp_bem.mesh import detect_reduced_symmetry_plane
+
+    verts, tris = _quarter_cube()
+    assert detect_reduced_symmetry_plane(verts, tris) == "yz+xz"
 
 
 def test_detect_reduced_symmetry_plane_ignores_closed_mesh():

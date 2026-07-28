@@ -383,36 +383,35 @@ def detect_reduced_symmetry_plane(
         return None
 
     used = vertices[used_vertices]
-    candidates: list[tuple[str, int]] = []
+    candidates: list[str] = []
+    boundary_on_plane: dict[str, NDArray[np.bool_]] = {}
     for plane, component in (("yz", 0), ("xz", 1), ("xy", 2)):
         values = used[:, component]
         on_plane = np.abs(values) <= tolerance
+        edge_values = vertices[boundary_edges, component]
+        boundary_on_plane[plane] = np.all(
+            np.abs(edge_values) <= tolerance, axis=1
+        )
         has_positive_side = bool(np.max(values) > tolerance)
         meaningful_count = int(np.count_nonzero(on_plane))
         if (
             np.min(values) >= -tolerance
             and has_positive_side
             and meaningful_count >= 2
-            and _count_edges_on_plane(vertices, boundary_edges, component, tolerance) >= 2
+            and np.count_nonzero(boundary_on_plane[plane]) >= 2
         ):
-            candidates.append((plane, component))
+            candidates.append(plane)
 
     if not candidates:
         return None
 
-    candidate_components = {plane: component for plane, component in candidates}
-    for plane, component in candidate_components.items():
-        if _all_edges_on_any_plane(vertices, boundary_edges, [component], tolerance):
+    for plane in candidates:
+        if np.all(boundary_on_plane[plane]):
             return plane
     if (
-        "yz" in candidate_components
-        and "xz" in candidate_components
-        and _all_edges_on_any_plane(
-            vertices,
-            boundary_edges,
-            [candidate_components["yz"], candidate_components["xz"]],
-            tolerance,
-        )
+        "yz" in candidates
+        and "xz" in candidates
+        and np.all(boundary_on_plane["yz"] | boundary_on_plane["xz"])
     ):
         return "yz+xz"
     return None
@@ -442,36 +441,3 @@ def _warn_if_reduced_symmetry_mesh(
         RuntimeWarning,
         stacklevel=3,
     )
-
-
-def _count_edges_on_plane(
-    vertices: NDArray[np.float64],
-    edges: NDArray[np.int32],
-    component: int,
-    tolerance: float,
-) -> int:
-    return int(
-        np.count_nonzero(_edge_on_plane_mask(vertices, edges, component, tolerance))
-    )
-
-
-def _all_edges_on_any_plane(
-    vertices: NDArray[np.float64],
-    edges: NDArray[np.int32],
-    components: list[int],
-    tolerance: float,
-) -> bool:
-    explained = np.zeros(edges.shape[0], dtype=bool)
-    for component in components:
-        explained |= _edge_on_plane_mask(vertices, edges, component, tolerance)
-    return bool(np.all(explained))
-
-
-def _edge_on_plane_mask(
-    vertices: NDArray[np.float64],
-    edges: NDArray[np.int32],
-    component: int,
-    tolerance: float,
-) -> NDArray[np.bool_]:
-    edge_values = vertices[edges, component]
-    return np.all(np.abs(edge_values) <= tolerance, axis=1)
