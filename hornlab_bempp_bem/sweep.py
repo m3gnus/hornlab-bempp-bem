@@ -30,6 +30,16 @@ from .result import SolveResult
 logger = logging.getLogger(__name__)
 
 
+def _solver_log_entry(fr: FrequencyResult) -> dict:
+    """Build the diagnostic fields shared by every sweep execution path."""
+    return {
+        "frequency_hz": fr.frequency_hz,
+        "iterations": fr.iterations,
+        "converged": fr.converged,
+        "timing_s": fr.timing_s,
+    }
+
+
 def _build_frequency_grid(config: SolveConfig) -> NDArray[np.float64]:
     if config.freq_spacing == "log":
         return np.geomspace(config.freq_min_hz, config.freq_max_hz, config.freq_count)
@@ -146,7 +156,6 @@ def run_sweep_serial(
     source_tags = list(config.velocity_sources.keys())
     freq_results: list[FrequencyResult] = []
     surface_pavg: dict[int, list[complex]] = {tag: [] for tag in source_tags}
-    completed_freqs: list[float] = []
 
     # Pre-compute op_kwargs for per-frequency far-field evaluation
     # (only used when on_frequency_result is set)
@@ -170,7 +179,6 @@ def run_sweep_serial(
             closed_mesh_validated=True,
         )
         freq_results.append(fr)
-        completed_freqs.append(float(freq))
 
         # Surface pressure average per source tag
         pavg = compute_surface_pressure_avg(
@@ -180,13 +188,8 @@ def run_sweep_serial(
         for tag in source_tags:
             surface_pavg[tag].append(pavg[tag])
 
-        log_entry = {
-            "frequency_hz": fr.frequency_hz,
-            "iterations": fr.iterations,
-            "converged": fr.converged,
-            "timing_s": fr.timing_s,
-            "impedance": fr.impedance,
-        }
+        log_entry = _solver_log_entry(fr)
+        log_entry["impedance"] = fr.impedance
 
         # When the callback is set, evaluate per-frequency directivity
         # so the caller can act on partial results as they stream in.
@@ -220,10 +223,7 @@ def run_sweep_serial(
 
     t_solve = time.time() - t_total
 
-    # Trim frequencies to only those actually completed (for early stopping)
-    actual_freqs = np.array(completed_freqs, dtype=np.float64)
-
-    if has_callback and len(callback_pressure_rows) == len(freq_results):
+    if has_callback:
         logger.info("Reusing callback directivity rows for final result.")
         t_dir = 0.0
         pressure = np.stack(callback_pressure_rows, axis=0)
@@ -241,15 +241,7 @@ def run_sweep_serial(
         [fr.impedance for fr in freq_results], dtype=np.complex128,
     )
 
-    solver_log = [
-        {
-            "frequency_hz": fr.frequency_hz,
-            "iterations": fr.iterations,
-            "converged": fr.converged,
-            "timing_s": fr.timing_s,
-        }
-        for fr in freq_results
-    ]
+    solver_log = [_solver_log_entry(fr) for fr in freq_results]
 
     # Build surface_pressure_avg arrays
     sp_avg: dict[int, np.ndarray] = {}
@@ -257,7 +249,9 @@ def run_sweep_serial(
         sp_avg[tag] = np.array(surface_pavg[tag], dtype=np.complex128)
 
     return SolveResult(
-        frequencies_hz=actual_freqs,
+        frequencies_hz=np.array(
+            frequencies[:len(freq_results)], dtype=np.float64,
+        ),
         pressure_complex=pressure,
         spl_db=spl,
         impedance=impedance,
@@ -340,9 +334,7 @@ def run_sweep_parallel(
         max_workers=len(chunks), mp_context=ctx,
     ) as executor:
         futures = {}
-        for ci, (chunk_freqs, chunk_idx) in enumerate(
-            zip(chunks, chunk_indices),
-        ):
+        for chunk_freqs, chunk_idx in zip(chunks, chunk_indices):
             fut = executor.submit(
                 _worker_solve_chunk,
                 mesh_grid_verts=np.array(mesh.grid.vertices),
@@ -407,7 +399,6 @@ def _worker_solve_chunk(
     """Worker function: reconstruct grid, solve, evaluate far-field, return arrays."""
     import bempp_cl.api as bempp_api
 
-    from ._constants import SPEED_OF_SOUND
     grid = bempp_api.Grid(mesh_grid_verts, mesh_grid_elems)
     p1_space, dp0_space = _setup_function_spaces(grid)
 
@@ -446,12 +437,7 @@ def _worker_solve_chunk(
         )
         for tag in source_tags:
             surface_pressure[tag][i] = pavg[tag]
-        log_entries.append({
-            "frequency_hz": fr.frequency_hz,
-            "iterations": fr.iterations,
-            "converged": fr.converged,
-            "timing_s": fr.timing_s,
-        })
+        log_entries.append(_solver_log_entry(fr))
 
         k_real = 2.0 * np.pi * freq / SPEED_OF_SOUND
         pressure[i], spl[i] = _evaluate_observation_planes(
