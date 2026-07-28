@@ -58,6 +58,30 @@ def test_solve_config_rejects_unknown_backend():
         SolveConfig(assembly_backend="cuda")  # type: ignore[arg-type]
 
 
+def test_solve_config_rejects_unknown_frequency_spacing():
+    with pytest.raises(ValueError, match="freq_spacing"):
+        SolveConfig(freq_spacing="quadratic")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("freq_min_hz", 0.0),
+        ("freq_min_hz", -1.0),
+        ("freq_min_hz", np.nan),
+        ("freq_max_hz", np.inf),
+    ],
+)
+def test_solve_config_rejects_invalid_frequency_bounds(field, value):
+    with pytest.raises(ValueError, match=field):
+        SolveConfig(**{field: value})
+
+
+def test_solve_config_rejects_reversed_frequency_range():
+    with pytest.raises(ValueError, match="freq_min_hz must not exceed"):
+        SolveConfig(freq_min_hz=2000.0, freq_max_hz=1000.0)
+
+
 def test_solve_config_rejects_metal_backend():
     with pytest.raises(ValueError, match="assembly_backend"):
         SolveConfig(assembly_backend="metal")  # type: ignore[arg-type]
@@ -193,3 +217,23 @@ def test_public_solve_rejects_velocity_source_tags_missing_from_mesh(entrypoint)
             hornlab_bempp_bem.solve(loaded, config)
         else:
             hornlab_bempp_bem.solve_frequencies(loaded, [1000.0], config)
+
+
+@pytest.mark.parametrize(
+    ("frequencies", "message"),
+    [
+        (1000.0, "one-dimensional"),
+        ([[500.0, 1000.0]], "one-dimensional"),
+        ([500.0, np.nan], "finite"),
+        ([500.0, np.inf], "finite"),
+        ([500.0, 0.0], "positive"),
+        ([500.0, -1000.0], "positive"),
+    ],
+)
+def test_solve_frequencies_rejects_invalid_values_before_loading_mesh(
+    frequencies, message
+):
+    import hornlab_bempp_bem
+
+    with pytest.raises(ValueError, match=message):
+        hornlab_bempp_bem.solve_frequencies(object(), frequencies)

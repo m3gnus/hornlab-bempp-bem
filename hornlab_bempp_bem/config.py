@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from math import isfinite
 from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
@@ -140,6 +141,20 @@ class SolveConfig:
     on_frequency_result: Callable[[int, float, dict], bool] | None = None
 
     def __post_init__(self) -> None:
+        if self.freq_spacing not in {"log", "linear"}:
+            raise ValueError("freq_spacing must be 'log' or 'linear'")
+        for field_name in ("freq_min_hz", "freq_max_hz"):
+            value = getattr(self, field_name)
+            try:
+                valid = isfinite(value) and value > 0.0
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                raise ValueError(
+                    f"{field_name} must be finite and greater than zero"
+                )
+        if self.freq_min_hz > self.freq_max_hz:
+            raise ValueError("freq_min_hz must not exceed freq_max_hz")
         try:
             self.formulation = BIEFormulation(self.formulation)
         except (TypeError, ValueError):

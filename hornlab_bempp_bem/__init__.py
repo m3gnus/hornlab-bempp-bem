@@ -62,6 +62,26 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
+def _coerce_frequencies(frequencies_hz) -> np.ndarray:
+    """Return a one-dimensional array of finite, positive frequencies."""
+    try:
+        frequencies = np.asarray(frequencies_hz, dtype=np.float64)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "frequencies_hz must be a one-dimensional sequence of numbers"
+        ) from None
+
+    if frequencies.ndim != 1:
+        raise ValueError(
+            "frequencies_hz must be a one-dimensional sequence of numbers"
+        )
+    if not np.all(np.isfinite(frequencies)):
+        raise ValueError("frequencies_hz must contain only finite values")
+    if np.any(frequencies <= 0.0):
+        raise ValueError("frequencies_hz must contain only positive values")
+    return frequencies
+
+
 def _detect_worker_count() -> int:
     """Auto-detect physical core count (not hyperthreads)."""
     try:
@@ -176,6 +196,7 @@ def solve_frequencies(
         config = SolveConfig()
 
     reject_unsupported_native_symmetry(config)
+    freqs = _coerce_frequencies(frequencies_hz)
 
     loaded = _resolve_mesh(
         mesh, scale=config.mesh_scale, require_closed=config.require_closed_mesh
@@ -184,8 +205,6 @@ def solve_frequencies(
     frame = _resolve_frame(loaded, config)
 
     from .sweep import run_sweep_serial
-
-    freqs = np.asarray(frequencies_hz, dtype=np.float64)
 
     # Always serial for caller-ordered frequencies (order matters)
     return run_sweep_serial(
