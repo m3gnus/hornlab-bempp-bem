@@ -163,13 +163,15 @@ def _build_neumann_data(
 
 def _build_p1_to_dp0_projection(p1_space, dp0_space):
     """Sparse P1→DP0 coefficient projection: vertex pressures → per-element
-    averages. Each output DP0 DOF = mean of the 3 P1 vertex DOFs on that
-    triangle.
+    averages. Each output DP0 DOF is the integral average of the P1 function
+    on that triangle. Local multipliers keep excluded boundary DOFs at zero on
+    open surfaces.
     """
     import scipy.sparse as sp
     n_dp0 = dp0_space.global_dof_count
     n_p1 = p1_space.global_dof_count
     local2global = np.array(p1_space.local2global)  # (n_elements, 3)
+    local_multipliers = np.asarray(p1_space.local_multipliers)
     if local2global.shape[0] != n_dp0:
         raise RuntimeError(
             f"local2global has {local2global.shape[0]} rows but DP0 space "
@@ -177,7 +179,7 @@ def _build_p1_to_dp0_projection(p1_space, dp0_space):
         )
     rows = np.repeat(np.arange(n_dp0, dtype=np.int64), 3)
     cols = local2global.flatten().astype(np.int64)
-    data = np.full(n_dp0 * 3, 1.0 / 3.0, dtype=np.float64)
+    data = local_multipliers.flatten().astype(np.float64) / 3.0
     return sp.csr_matrix((data, (rows, cols)), shape=(n_dp0, n_p1))
 
 
@@ -467,6 +469,8 @@ def compute_surface_pressure_avg(
     areas = np.array(grid.volumes)
     coeffs = np.asarray(p_surface.coefficients)
     local2global = np.array(p1_space.local2global)
+    local_multipliers = np.asarray(p1_space.local_multipliers)
+    local_coeffs = coeffs[local2global] * local_multipliers
 
     result = {}
     for tag in tags:
@@ -477,9 +481,7 @@ def compute_surface_pressure_avg(
             continue
 
         elem_areas = areas[elem_indices]
-        p1_dofs = local2global[elem_indices]  # (N, 3)
-        p_at_verts = coeffs[p1_dofs]           # (N, 3) complex
-        p_avg_per_elem = np.mean(p_at_verts, axis=1)  # (N,)
+        p_avg_per_elem = np.mean(local_coeffs[elem_indices], axis=1)
 
         total_area = np.sum(elem_areas)
         if total_area < 1e-30:

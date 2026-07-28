@@ -176,6 +176,7 @@ class TestComputeSurfacePressureAvg:
         )
         p1_space = MagicMock()
         p1_space.local2global = np.array([[0, 1, 2], [3, 4, 5]])
+        p1_space.local_multipliers = np.ones((2, 3))
         tags = np.array([2, 2], dtype=np.int32)
 
         expected = (100.0 * 0.03 + 200.0 * 0.01) / 0.04
@@ -209,6 +210,7 @@ class TestComputeSurfacePressureAvg:
         p1_space.local2global = np.array([
             [0, 1, 2], [1, 2, 3], [2, 3, 4], [3, 4, 5],
         ])
+        p1_space.local_multipliers = np.ones((4, 3))
 
         tags = np.array([2, 2, 2, 2], dtype=np.int32)
 
@@ -232,6 +234,7 @@ class TestComputeSurfacePressureAvg:
 
         p1_space = MagicMock()
         p1_space.local2global = np.array([[0, 1, 2], [3, 4, 5]])
+        p1_space.local_multipliers = np.ones((2, 3))
 
         tags = np.array([2, 2], dtype=np.int32)
 
@@ -255,6 +258,7 @@ class TestComputeSurfacePressureAvg:
 
         p1_space = MagicMock()
         p1_space.local2global = np.array([[0, 1, 2]])
+        p1_space.local_multipliers = np.ones((1, 3))
 
         tags = np.array([1], dtype=np.int32)
 
@@ -283,6 +287,7 @@ class TestComputeSurfacePressureAvg:
 
         p1_space = MagicMock()
         p1_space.local2global = np.array([[0, 1, 2], [3, 4, 5], [6, 7, 8]])
+        p1_space.local_multipliers = np.ones((3, 3))
 
         tags = np.array([2, 3, 2], dtype=np.int32)
 
@@ -293,12 +298,59 @@ class TestComputeSurfacePressureAvg:
         np.testing.assert_allclose(result[2], 50.0, rtol=1e-10)
         np.testing.assert_allclose(result[3], 150.0, rtol=1e-10)
 
+    def test_excluded_boundary_dofs_contribute_zero(self):
+        from hornlab_bempp_bem.bie import compute_surface_pressure_avg
+
+        grid = MagicMock()
+        grid.volumes = np.array([1.0, 1.0])
+        p_surface = MagicMock()
+        p_surface.coefficients = np.array([30.0, 60.0], dtype=np.complex128)
+        p1_space = MagicMock()
+        p1_space.local2global = np.array([[0, 1, 0], [1, 0, 0]])
+        p1_space.local_multipliers = np.array([
+            [1.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ])
+
+        result = compute_surface_pressure_avg(
+            grid,
+            p_surface,
+            np.array([2, 2], dtype=np.int32),
+            p1_space,
+            [2],
+        )
+
+        np.testing.assert_allclose(result[2], 25.0)
+
 
 # ---------------------------------------------------------------------------
 # Robin contribution assembly
 # ---------------------------------------------------------------------------
 
 class TestRobinContribution:
+
+    def test_projection_respects_excluded_boundary_dofs(self):
+        from hornlab_bempp_bem.bie import _build_p1_to_dp0_projection
+
+        p1_space = SimpleNamespace(
+            global_dof_count=2,
+            local2global=np.array([[0, 1, 0], [1, 0, 0]]),
+            local_multipliers=np.array([
+                [1.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+            ]),
+        )
+        dp0_space = SimpleNamespace(global_dof_count=2)
+
+        projection = _build_p1_to_dp0_projection(p1_space, dp0_space)
+
+        np.testing.assert_allclose(
+            projection.toarray(),
+            np.array([
+                [1.0 / 3.0, 1.0 / 3.0],
+                [0.0, 1.0 / 3.0],
+            ]),
+        )
 
     def test_sparse_projection_is_not_densified(self):
         import scipy.sparse as sp
