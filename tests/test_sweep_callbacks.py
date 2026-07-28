@@ -89,6 +89,19 @@ def _standard_sweep_patches():
 
 class TestOnAxisIndex:
 
+    def test_spl_normalisation_handles_silent_points_without_log_warning(self):
+        from hornlab_bempp_bem._constants import REFERENCE_PRESSURE
+        from hornlab_bempp_bem.sweep import _normalized_spl_db
+
+        pressure = np.array(
+            [0.0, REFERENCE_PRESSURE, 10.0 * REFERENCE_PRESSURE],
+            dtype=np.complex128,
+        )
+        with np.errstate(divide="raise", invalid="raise"):
+            spl = _normalized_spl_db(pressure, on_axis_idx=1)
+
+        np.testing.assert_allclose(spl, [-120.0, 0.0, 20.0])
+
     def test_on_axis_at_nonzero_angle_min(self):
         angles = np.array([-90.0, -45.0, 0.0, 45.0, 90.0])
         on_axis_idx = int(np.argmin(np.abs(angles)))

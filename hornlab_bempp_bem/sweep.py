@@ -36,6 +36,20 @@ def _build_frequency_grid(config: SolveConfig) -> NDArray[np.float64]:
     return np.linspace(config.freq_min_hz, config.freq_max_hz, config.freq_count)
 
 
+def _normalized_spl_db(
+    pressure: NDArray[np.complex128],
+    on_axis_idx: int,
+) -> NDArray[np.float64]:
+    """Convert pressure to SPL and normalize the on-axis value to zero."""
+    amplitudes = np.abs(pressure)
+    spl_raw = np.full(amplitudes.shape, -120.0, dtype=np.float64)
+    audible = amplitudes > 1e-15
+    spl_raw[audible] = 20.0 * np.log10(
+        amplitudes[audible] / REFERENCE_PRESSURE
+    )
+    return spl_raw - spl_raw[on_axis_idx]
+
+
 def _evaluate_directivity(
     freq_results: list[FrequencyResult],
     obs_points: NDArray[np.float64],
@@ -75,15 +89,7 @@ def _evaluate_directivity(
                 k_real, pts, op_kwargs,
             )
             pressure[fi, pi, :] = p_complex
-
-            amplitudes = np.abs(p_complex)
-            spl_raw = np.where(
-                amplitudes > 1e-15,
-                20.0 * np.log10(amplitudes / REFERENCE_PRESSURE),
-                -120.0,
-            )
-            # Normalise: on-axis (0 deg) = 0 dB
-            spl[fi, pi, :] = spl_raw - spl_raw[on_axis_idx]
+            spl[fi, pi, :] = _normalized_spl_db(p_complex, on_axis_idx)
 
     return pressure, spl
 
@@ -175,13 +181,9 @@ def run_sweep_serial(
                     k_real, obs_points[pi], _ff_op_kwargs,
                 )
                 per_freq_pressure[pi, :] = p_complex
-                amplitudes = np.abs(p_complex)
-                spl_raw = np.where(
-                    amplitudes > 1e-15,
-                    20.0 * np.log10(amplitudes / REFERENCE_PRESSURE),
-                    -120.0,
+                per_freq_spl[pi, :] = _normalized_spl_db(
+                    p_complex, on_axis_idx,
                 )
-                per_freq_spl[pi, :] = spl_raw - spl_raw[on_axis_idx]
             callback_pressure_rows.append(per_freq_pressure)
             callback_spl_rows.append(per_freq_spl)
             log_entry["observation_spl_db"] = per_freq_spl
@@ -387,7 +389,7 @@ def _worker_solve_chunk(
     """Worker function: reconstruct grid, solve, evaluate far-field, return arrays."""
     import bempp_cl.api as bempp_api
 
-    from ._constants import REFERENCE_PRESSURE, SPEED_OF_SOUND
+    from ._constants import SPEED_OF_SOUND
     grid = bempp_api.Grid(mesh_grid_verts, mesh_grid_elems)
     p1_space, dp0_space = _setup_function_spaces(grid)
 
@@ -442,12 +444,6 @@ def _worker_solve_chunk(
                 k_real, pts, op_kwargs,
             )
             pressure[i, pi, :] = p_complex
-            amplitudes = np.abs(p_complex)
-            spl_raw = np.where(
-                amplitudes > 1e-15,
-                20.0 * np.log10(amplitudes / REFERENCE_PRESSURE),
-                -120.0,
-            )
-            spl[i, pi, :] = spl_raw - spl_raw[on_axis_idx]
+            spl[i, pi, :] = _normalized_spl_db(p_complex, on_axis_idx)
 
     return pressure, spl, impedance, log_entries, surface_pressure
