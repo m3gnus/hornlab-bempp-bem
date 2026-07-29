@@ -72,6 +72,13 @@ the surface must additionally be a closed 2-manifold: every edge shared by
 exactly two triangles. Open edges and non-manifold edges are rejected. The
 check also applies to pre-loaded `LoadedMesh` inputs passed to `solve()`.
 
+On an open surface, Bempp's default continuous P1 space excludes free-boundary
+degrees of freedom, constraining pressure to zero along the free edges.
+`hornlab-metal-bem` instead uses an all-vertex P1 pressure space. Open-mesh
+results are therefore not directly comparable between the two backends.
+Closed meshes have no free-boundary degrees of freedom, so the two P1 space
+choices are identical there.
+
 Use `solve_frequencies(mesh, frequencies_hz, config=None)` when frequency
 order comes from the caller instead of a generated sweep.
 

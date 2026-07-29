@@ -134,7 +134,11 @@ class SolveConfig:
     # edges). Set by callers solving closed-mode geometries (enclosure /
     # capped free-standing box): this backend has no symmetry support, so a
     # closed-mode mesh with open edges is a leaking model that would solve
-    # silently wrong. Also checked for pre-loaded LoadedMesh inputs.
+    # silently wrong. Also checked for pre-loaded LoadedMesh inputs. On an
+    # intentionally open mesh, Bempp's default P1 pressure space constrains
+    # free-boundary DOFs to zero; hornlab-metal-bem's all-vertex P1 space does
+    # not, so open-mesh results are not directly comparable across backends.
+    # Closed meshes use identical P1 spaces.
     require_closed_mesh: bool = False
 
     # Air density (kg/m^3). Default 1.2041 matches standard air at 20 C.

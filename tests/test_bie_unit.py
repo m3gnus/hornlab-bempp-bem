@@ -16,6 +16,55 @@ from hornlab_bempp_bem.config import SolveConfig, SourceMotion, VelocityMode
 _FRAME_AXIS = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
 
+def test_open_mesh_p1_space_excludes_free_boundary_dofs():
+    import bempp_cl.api as bempp_api
+
+    vertices = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    closed_triangles = np.array(
+        [
+            [0, 2, 1],
+            [0, 1, 3],
+            [0, 3, 2],
+            [1, 2, 3],
+        ],
+        dtype=np.int32,
+    )
+
+    closed_grid = bempp_api.Grid(vertices.T, closed_triangles.T)
+    closed_default = bempp_api.function_space(closed_grid, "P", 1)
+    closed_all_vertices = bempp_api.function_space(
+        closed_grid, "P", 1, include_boundary_dofs=True,
+    )
+    assert closed_default.global_dof_count == closed_all_vertices.global_dof_count
+    np.testing.assert_array_equal(
+        closed_default.local2global, closed_all_vertices.local2global,
+    )
+    np.testing.assert_array_equal(
+        closed_default.local_multipliers,
+        closed_all_vertices.local_multipliers,
+    )
+
+    open_grid = bempp_api.Grid(vertices.T, closed_triangles[:-1].T)
+    open_default = bempp_api.function_space(open_grid, "P", 1)
+    open_all_vertices = bempp_api.function_space(
+        open_grid, "P", 1, include_boundary_dofs=True,
+    )
+    assert open_default.global_dof_count < open_all_vertices.global_dof_count
+    assert np.any(np.asarray(open_default.local_multipliers) == 0.0)
+    np.testing.assert_array_equal(
+        open_all_vertices.local_multipliers,
+        np.ones_like(open_all_vertices.local_multipliers),
+    )
+
+
 def _two_face_cap_grid(theta_rad: float) -> SimpleNamespace:
     """Two triangles whose outward unit normals sit at +/- theta from +z (equal
     area). The shared frame axis is +z, so each face projects to cos(theta);
