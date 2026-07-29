@@ -65,11 +65,11 @@ def load_mesh(
         )
     except (KeyError, ValueError) as exc:
         raise MeshError("Mesh file has no triangle physical-group tags") from exc
-    phys_group_names = {
-        int(data[0]): name
-        for name, data in mesh.field_data.items()
-        if int(data[1]) == 2
-    }
+    phys_group_names = _extract_physical_names(path)
+    for name, raw in getattr(mesh, "field_data", {}).items():
+        values = np.asarray(raw).reshape(-1)
+        if values.size >= 2 and int(values[1]) == 2:
+            phys_group_names[int(values[0])] = str(name)
 
     verts, triangles, merged_vertices = _merge_duplicate_vertices(
         verts, triangles, merge_tol,
@@ -125,6 +125,32 @@ def load_mesh(
     )
 
     return LoadedMesh(grid=grid, physical_tags=phys_tags, info=info)
+
+
+def _extract_physical_names(path: Path) -> dict[int, str]:
+    names: dict[int, str] = {}
+    in_block = False
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if line == "$PhysicalNames":
+                    in_block = True
+                    continue
+                if line == "$EndPhysicalNames":
+                    break
+                if not in_block:
+                    continue
+                parts = line.split(maxsplit=2)
+                if len(parts) < 3 or not parts[0].isdigit():
+                    continue
+                dim = int(parts[0])
+                tag = int(parts[1])
+                if dim == 2:
+                    names[tag] = parts[2].strip().strip('"')
+    except OSError:
+        return names
+    return names
 
 
 def _merge_duplicate_vertices(

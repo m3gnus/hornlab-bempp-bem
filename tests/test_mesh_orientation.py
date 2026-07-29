@@ -349,6 +349,80 @@ def test_load_mesh_require_closed(tmp_path):
         load_mesh(nonmanifold, require_closed=True)
 
 
+@pytest.mark.parametrize(
+    ("file_format", "binary"),
+    [
+        ("gmsh22", False),
+        ("gmsh22", True),
+        ("gmsh", False),
+        ("gmsh", True),
+    ],
+)
+def test_load_mesh_preserves_2d_name_reused_by_3d_group(
+    tmp_path, file_format, binary
+):
+    import meshio
+
+    from hornlab_bempp_bem.mesh import load_mesh
+
+    points = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    mesh = meshio.Mesh(
+        points,
+        [
+            ("triangle", np.array([[0, 2, 1]], dtype=np.int32)),
+            ("triangle", np.array([[3, 4, 5]], dtype=np.int32)),
+        ],
+        cell_data={
+            "gmsh:physical": [
+                np.array([1], dtype=np.int32),
+                np.array([2], dtype=np.int32),
+            ],
+            "gmsh:geometrical": [
+                np.array([1], dtype=np.int32),
+                np.array([2], dtype=np.int32),
+            ],
+        },
+        point_data={
+            "gmsh:dim_tags": np.array(
+                [[2, 1]] * 3 + [[2, 2]] * 3,
+                dtype=np.int32,
+            ),
+        },
+        field_data={
+            "wall": np.array([1, 2], dtype=np.int32),
+            "source": np.array([2, 2], dtype=np.int32),
+        },
+    )
+    mesh_path = tmp_path / f"collision-{file_format}-{binary}.msh"
+    meshio.write(mesh_path, mesh, file_format=file_format, binary=binary)
+
+    original_names = (
+        b'$PhysicalNames\n2\n2 1 "wall"\n2 2 "source"\n$EndPhysicalNames'
+    )
+    colliding_names = (
+        b'$PhysicalNames\n3\n2 1 "wall"\n3 7 "wall"\n'
+        b'2 2 "source"\n$EndPhysicalNames'
+    )
+    contents = mesh_path.read_bytes()
+    assert original_names in contents
+    mesh_path.write_bytes(contents.replace(original_names, colliding_names, 1))
+
+    loaded = load_mesh(mesh_path, validate=False, merge_tol=0)
+
+    assert loaded.info.physical_groups == {1: "wall", 2: "source"}
+    np.testing.assert_array_equal(loaded.physical_tags, [1, 2])
+
+
 def test_load_mesh_uses_all_triangle_blocks_with_aligned_tags(
     monkeypatch, tmp_path
 ):
