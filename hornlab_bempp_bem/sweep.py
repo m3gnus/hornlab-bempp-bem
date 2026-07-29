@@ -138,6 +138,10 @@ def run_sweep_serial(
     mesh_contracts_validated: bool = False,
 ) -> SolveResult:
     """Run frequency sweep in a single process."""
+    frequencies = np.asarray(frequencies, dtype=np.float64)
+    if frequencies.size == 0:
+        raise ValueError("frequencies must contain at least one value")
+
     t_total = time.time()
 
     if not mesh_contracts_validated:
@@ -298,6 +302,10 @@ def run_sweep_parallel(
     Callbacks (progress_callback, on_frequency_result) are not supported
     in parallel mode — they are not picklable across process boundaries.
     """
+    frequencies = np.asarray(frequencies, dtype=np.float64)
+    if frequencies.size == 0:
+        raise ValueError("frequencies must contain at least one value")
+
     if config.progress_callback is not None or config.on_frequency_result is not None:
         raise ValueError(
             "progress_callback and on_frequency_result are not supported in "

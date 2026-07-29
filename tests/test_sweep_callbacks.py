@@ -326,6 +326,35 @@ class TestParallelRejectsCallbacks:
 
 
 # ---------------------------------------------------------------------------
+# Empty sweeps
+# ---------------------------------------------------------------------------
+
+class TestEmptySweeps:
+
+    def test_serial_rejects_empty_frequencies_before_setup(self):
+        from hornlab_bempp_bem.sweep import run_sweep_serial
+
+        with patch(f"{_SWEEP}._setup_function_spaces") as setup_spaces, \
+             pytest.raises(ValueError, match="frequencies must contain at least one value"):
+            run_sweep_serial(
+                _make_mesh(), np.array([]), _make_frame(), SolveConfig(),
+            )
+
+        setup_spaces.assert_not_called()
+
+    def test_parallel_rejects_empty_frequencies_before_spawning(self):
+        from hornlab_bempp_bem.sweep import run_sweep_parallel
+
+        with patch(f"{_SWEEP}.ProcessPoolExecutor") as executor, \
+             pytest.raises(ValueError, match="frequencies must contain at least one value"):
+            run_sweep_parallel(
+                _make_mesh(), np.array([]), _make_frame(), SolveConfig(), 2,
+            )
+
+        executor.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # surface_pressure_avg populated in result
 # ---------------------------------------------------------------------------
 

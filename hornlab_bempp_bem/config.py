@@ -46,6 +46,16 @@ AssemblyBackend = Literal["opencl", "numba", "auto"]
 NativeSymmetryPlane = Literal["yz", "xz", "xy", "yz+xz"]
 
 
+def _is_integral_value(value: object) -> bool:
+    """Return whether ``value`` represents an integer, excluding booleans."""
+    if isinstance(value, bool):
+        return False
+    try:
+        return isfinite(float(value)) and int(value) == value
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 @dataclass
 class ObservationConfig:
     planes: list[str] = field(default_factory=lambda: ["horizontal", "vertical"])
@@ -143,6 +153,9 @@ class SolveConfig:
     def __post_init__(self) -> None:
         if self.freq_spacing not in {"log", "linear"}:
             raise ValueError("freq_spacing must be 'log' or 'linear'")
+        if not _is_integral_value(self.freq_count) or self.freq_count < 1:
+            raise ValueError("freq_count must be at least 1")
+        self.freq_count = int(self.freq_count)
         for field_name in ("freq_min_hz", "freq_max_hz"):
             value = getattr(self, field_name)
             try:

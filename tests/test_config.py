@@ -63,6 +63,19 @@ def test_solve_config_rejects_unknown_frequency_spacing():
         SolveConfig(freq_spacing="quadratic")  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("freq_count", [0, -1, 1.5, True, "2"])
+def test_solve_config_rejects_invalid_frequency_count(freq_count):
+    with pytest.raises(ValueError, match="freq_count must be at least 1"):
+        SolveConfig(freq_count=freq_count)  # type: ignore[arg-type]
+
+
+def test_solve_config_normalizes_integral_frequency_count():
+    config = SolveConfig(freq_count=2.0)  # type: ignore[arg-type]
+
+    assert config.freq_count == 2
+    assert isinstance(config.freq_count, int)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
