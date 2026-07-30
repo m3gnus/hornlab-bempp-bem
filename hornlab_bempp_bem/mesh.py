@@ -36,6 +36,7 @@ def load_mesh(
     merge_tol: float = 1e-9,
     repair_normals: bool = False,
     require_closed: bool = False,
+    native_symmetry_plane: str | None = None,
 ) -> LoadedMesh:
     """Load a .msh file into a bempp Grid with physical group tags.
 
@@ -96,9 +97,16 @@ def load_mesh(
         _require_closed_surface(
             verts, triangles, edge_incidence=edge_incidence,
         )
-    elif validate:
+    elif validate and native_symmetry_plane is None:
         _warn_if_reduced_symmetry_mesh(
             verts, triangles, edge_incidence=edge_incidence,
+        )
+    elif validate:
+        _check_declared_symmetry_plane(
+            verts,
+            triangles,
+            native_symmetry_plane,
+            edge_incidence=edge_incidence,
         )
 
     if validate:
@@ -436,12 +444,58 @@ def _warn_if_reduced_symmetry_mesh(
         return
     warnings.warn(
         "Mesh looks like a mirror-reduced native-symmetry mesh "
-        f"(suspected plane {suspected!r}), but this backend has no symmetry "
-        "support: it would silently solve the open shell instead of the "
-        "mirrored geometry. Mesh the full domain for bempp, or solve the "
-        f"reduced mesh with hornlab-metal-bem and native_symmetry_plane="
-        f"{suspected!r}. If the rim is a real open boundary (bare horn), "
-        "ignore this warning.",
+        f"(suspected plane {suspected!r}), but native_symmetry_plane was not "
+        "declared. Set that option so Bempp reconstructs the mirrored geometry, "
+        "or mesh the full domain. If the rim is a real open boundary (bare "
+        "horn), ignore this warning.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
+def _plane_set(plane: str | None) -> frozenset[str]:
+    return frozenset(str(plane).strip().lower().split("+")) if plane else frozenset()
+
+
+def _check_declared_symmetry_plane(
+    vertices_nx3: NDArray[np.float64],
+    triangles_nx3: NDArray[np.int32],
+    declared_plane: str,
+    *,
+    edge_incidence: tuple[NDArray[np.int32], NDArray[np.int64]] | None = None,
+) -> None:
+    """Cross-check a declared symmetry plane against the mesh's own geometry.
+
+    Declaring a plane used to switch the reduced-mesh detector off entirely,
+    which is exactly when it is most useful: it already returns the right
+    answer, it was simply never consulted. A quarter mesh declared as a half
+    model (``quadrants=12`` on a ``quadrants=1`` mesh) is mirrored in one axis
+    only, leaving the other cut plane open, and the solve proceeds on a torn
+    shell. Nothing downstream catches that -- the expansion's own edge-count
+    invariant balances, because the unmirrored cut simply reads as a rim.
+    """
+    detected = detect_reduced_symmetry_plane(
+        vertices_nx3, triangles_nx3, edge_incidence=edge_incidence,
+    )
+    if detected is None:
+        return
+    detected_set = _plane_set(detected)
+    declared_set = _plane_set(declared_plane)
+    if detected_set == declared_set:
+        return
+    if detected_set > declared_set:
+        missing = sorted(detected_set - declared_set)
+        raise MeshError(
+            f"Mesh is cut on {sorted(detected_set)} but native_symmetry_plane "
+            f"declares only {sorted(declared_set)}. The {missing} cut "
+            "plane(s) would not be mirrored, so the solve would run on a torn "
+            "shell. Declare the full reduction (e.g. 'yz+xz' for a quarter "
+            "model) or supply a mesh matching the declared plane."
+        )
+    warnings.warn(
+        f"native_symmetry_plane={declared_plane!r} was declared but the mesh "
+        f"looks cut on {detected!r}. Mirroring will be attempted as declared; "
+        "verify the mesh matches the requested symmetry domain.",
         RuntimeWarning,
         stacklevel=3,
     )

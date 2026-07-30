@@ -14,7 +14,8 @@ Use the `hornlab_bempp_bem` namespace for new integrations.
 The package wraps HornLab's canonical Bempp solve path for Gmsh triangle
 surface meshes. It supports standard Neumann solves, complex-k shifted solves,
 Burton-Miller solves, optional Robin wall admittance through
-`impedance_sources`, and serial or parallel frequency sweeps.
+`impedance_sources`, native half/quarter mirror symmetry for rigid Neumann
+models, and serial or parallel frequency sweeps.
 
 `bempp-cl` supplies the numerical assembly and potential evaluation backend.
 The package does not import `gmsh` at runtime; meshes are read through
@@ -61,6 +62,8 @@ Mesh requirements:
 - triangle cells must have physical-group tags
 - triangle winding must be outward for canonical meshes
 - source/radiator tags must match `config.velocity_sources`
+- mirror-reduced meshes must occupy the positive side of each declared
+  symmetry plane and set `native_symmetry_plane`
 
 Signed-volume winding validation is applied to closed two-manifold meshes. It
 is intentionally not used to flip or reject open surfaces because their signed
@@ -70,7 +73,9 @@ declared outward winding on open/bare meshes.
 With `require_closed_mesh=True` (or `load_mesh(..., require_closed=True)`),
 the surface must additionally be a closed 2-manifold: every edge shared by
 exactly two triangles. Open edges and non-manifold edges are rejected. The
-check also applies to pre-loaded `LoadedMesh` inputs passed to `solve()`.
+check also applies to pre-loaded `LoadedMesh` inputs passed to `solve()`. For
+native symmetry, the check is applied after mirroring, so cut-plane edges are
+allowed but any remaining leak is rejected.
 
 On an open surface, Bempp's default continuous P1 space excludes free-boundary
 degrees of freedom, constraining pressure to zero along the free edges.
@@ -93,12 +98,16 @@ Common fields:
 - `velocity_mode`, either `VelocityMode.ACCELERATION` or `VelocityMode.VELOCITY`
 - `formulation`, one of `STANDARD`, `COMPLEX_K`, or `BURTON_MILLER`
 - `solver`, one of `AUTO`, `LU`, or `GMRES`
+- `gmres_tol` (default `1e-6`) and optional `gmres_restart`
 - `observation`, an `ObservationConfig`
 - `mesh_scale`
 - `air_density`
 - `require_closed_mesh`, reject open or non-manifold surfaces before solving
 - `assembly_backend`, one of `"opencl"`, `"numba"`, or `"auto"`
 - `opencl_device`, either `"cpu"` or `"gpu"` when using OpenCL
+- `native_symmetry_plane`, one of `None`, `"yz"`, `"xz"`, or `"yz+xz"`
+- `restrict_neumann_space`, exactly omit rigid-wall zero Neumann columns from
+  boundary and potential assembly
 - `progress_callback`
 - `on_frequency_result`, for streaming progress and early stop
 
@@ -106,6 +115,90 @@ Common fields:
 used only for side effects may return `None` and the sweep continues. Serial and
 parallel sweeps populate the same result fields, including
 `surface_pressure_avg`.
+
+## Performance
+
+Two bempp-cl behaviours dominate the cost of a sweep on production-sized meshes,
+and both are worked around in process from `configure_opencl`:
+
+- **bempp-cl rebuilds its OpenCL program on every operator assembly.** Nothing
+  in the build key varies across a sweep -- the wavenumber reaches the kernel as
+  a runtime buffer argument, never a compile-time macro -- yet each assembly
+  re-enters the full pyopencl build path, about 20-25 ms per call, three calls
+  per assembly and four assemblies per frequency. Memoizing it
+  (`_opencl_program_cache`) leaves assembled matrices **bitwise identical** and
+  cuts warm sweep time by 1.5-2.8x. The key covers the OpenCL context, so a
+  rebound device is never served a stale kernel, and the cache is thread-local
+  because `pyopencl.Kernel` is mutable.
+- **bempp-cl's kernel include path is unquoted**, which breaks OpenCL assembly
+  outright on any install path containing a space.
+
+Separately, LAPACK's LU scales *negatively* at waveguide matrix sizes -- a
+260x260 complex solve takes 1.7 ms on one BLAS thread and 29 ms on twelve --
+while GEMM scales normally. `_blas_threads` limits threads around the dense
+solve only, so the factorization gets its speed-up without taxing the rest of
+the process. It is best-effort: an unrecognised BLAS build leaves the thread
+count alone.
+
+## Workers
+
+`workers` selects the frequency-sweep execution mode:
+
+- `1` (default): one process, one warm interpreter.
+- `0`: auto. Splits across processes only when each worker would get at least
+  40 frequencies.
+- `n > 1`: exactly `n` worker processes, honoured as given, with a warning when
+  the sweep is too short to be worth it.
+
+The threshold is not arbitrary. A spawned worker re-imports bempp-cl and re-JITs
+its numba kernels before it can solve anything -- about 5 s -- against roughly
+0.13 s per warm frequency on the same machine, and bempp-cl's kernels are not
+declared cacheable, so that cost is paid per process every time. A worker has to
+solve about 40 frequencies to pay for its own start-up; below that a single warm
+process wins by a wide margin.
+
+Parallel sweeps support `progress_callback`, which stays in the parent process
+and is driven by a queue the workers publish to, so progress arrives as
+frequencies land rather than in order. `on_frequency_result` is rejected in
+parallel mode: it exists to abort a sweep, and a worker cannot cancel
+frequencies already running in its siblings.
+
+## Half and Quarter Symmetry
+
+Set `native_symmetry_plane` when the input mesh is a positive-side
+mirror-reduced domain:
+
+- `"yz"`: half model in `X >= 0`
+- `"xz"`: half model in `Y >= 0`
+- `"yz+xz"`: quarter model in `X >= 0, Y >= 0`
+
+The solver mirrors the mesh as integration geometry, tests the BIE on only the
+real half/quarter, and ties pressure coefficients across mirror orbits. This
+preserves Bempp's singular quadrature on cut-plane seams while avoiding the
+unused mirrored equation rows. Far-field pressure is evaluated from the
+reconstructed full trace.
+
+```python
+config = SolveConfig(
+    native_symmetry_plane="yz+xz",
+    formulation=BIEFormulation.COMPLEX_K,
+)
+result = solve("waveguide-quarter.msh", config)
+```
+
+Native symmetry currently supports `STANDARD` and `COMPLEX_K` rigid Neumann
+models. Burton-Miller, Robin `impedance_sources`, legacy `"xy"` symmetry, and
+coupled infinite-baffle models fail explicitly rather than solving an
+incorrect reduced open shell. When `gmres_restart` is left at `None`, the
+symmetry path selects a restart length of 100 for robust half-model
+convergence.
+
+Reduced/full expanded parity validates the mirror reduction itself. It does
+not remove the interior-resonance sensitivity of the underlying `STANDARD`
+integral equation; the current small `COMPLEX_K` shift can also remain
+mesh-sensitive near a resonance. Use independently validated frequency points
+for production conclusions until a symmetry-compatible combined-field or
+Burton-Miller path is available.
 
 `ObservationConfig` builds polar observation arcs by default:
 

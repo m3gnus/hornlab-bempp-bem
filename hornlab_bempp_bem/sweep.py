@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import logging
+import queue
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, wait
+from dataclasses import replace
 
 import numpy as np
 from numpy.typing import NDArray
@@ -38,6 +40,7 @@ def _solver_log_entry(fr: FrequencyResult) -> dict:
         "iterations": fr.iterations,
         "converged": fr.converged,
         "timing_s": fr.timing_s,
+        "phase_timings": dict(fr.phase_timings),
     }
 
 
@@ -70,6 +73,7 @@ def _evaluate_observation_planes(
     obs_points: NDArray[np.float64],
     op_kwargs: dict,
     on_axis_idx: int,
+    restrict_neumann_space: bool = True,
 ) -> tuple[NDArray[np.complex128], NDArray[np.float64]]:
     """Evaluate all observation planes in one Bempp potential operation."""
     n_planes, n_angles, _ = obs_points.shape
@@ -81,6 +85,7 @@ def _evaluate_observation_planes(
         k_real,
         obs_points.reshape(n_planes * n_angles, 3),
         op_kwargs,
+        restrict_neumann_space,
     ).reshape(n_planes, n_angles)
     return pressure, _normalized_spl_db(pressure, on_axis_idx)
 
@@ -107,23 +112,37 @@ def _evaluate_directivity(
     on_axis_idx = int(np.argmin(np.abs(angles_deg)))
 
     backend = resolve_assembly_backend(config).effective_backend
-    op_kwargs = _operator_kwargs(backend, config.precision, config.opencl_device)
+    op_kwargs = _operator_kwargs(
+        backend, config.precision, config.opencl_device,
+        vectorization_mode=getattr(config, "vectorization_mode", "auto"),
+    )
 
     for fi, fr in enumerate(freq_results):
         k_real = 2.0 * np.pi * fr.frequency_hz / SPEED_OF_SOUND
 
-        p1 = fr.pressure_on_surface.space
-        dp0 = fr.neumann_data.space
+        field_pressure = (
+            fr.field_pressure_on_surface
+            if fr.field_pressure_on_surface is not None
+            else fr.pressure_on_surface
+        )
+        field_neumann = (
+            fr.field_neumann_data
+            if fr.field_neumann_data is not None
+            else fr.neumann_data
+        )
+        p1 = field_pressure.space
+        dp0 = field_neumann.space
 
         pressure[fi], spl[fi] = _evaluate_observation_planes(
             p1,
             dp0,
-            fr.pressure_on_surface,
-            fr.neumann_data,
+            field_pressure,
+            field_neumann,
             k_real,
             obs_points,
             op_kwargs,
             on_axis_idx,
+            config.restrict_neumann_space,
         )
 
     return pressure, spl
@@ -156,7 +175,30 @@ def run_sweep_serial(
 
     obs_points, angles_deg = build_observation_points(frame, config.observation)
 
-    p1_space, dp0_space = _setup_function_spaces(mesh.grid)
+    symmetry_context = None
+    if config.native_symmetry_plane is None:
+        p1_space, dp0_space = _setup_function_spaces(mesh.grid)
+    else:
+        from .symmetry import build_symmetry_context
+
+        symmetry_context = build_symmetry_context(
+            mesh.grid,
+            mesh.physical_tags,
+            config.native_symmetry_plane,
+        )
+        if config.require_closed_mesh:
+            _require_closed_surface(
+                np.asarray(
+                    symmetry_context.expanded_grid.vertices,
+                    dtype=np.float64,
+                ).T,
+                np.asarray(
+                    symmetry_context.expanded_grid.elements,
+                    dtype=np.int32,
+                ).T,
+            )
+        p1_space = symmetry_context.reduced_p1
+        dp0_space = symmetry_context.reduced_dp0
 
     source_tags = list(config.velocity_sources.keys())
     axial_element_scale = None
@@ -179,6 +221,7 @@ def run_sweep_serial(
         _backend = resolve_assembly_backend(config).effective_backend
         _ff_op_kwargs = _operator_kwargs(
             _backend, config.precision, config.opencl_device,
+            vectorization_mode=getattr(config, "vectorization_mode", "auto"),
         )
         on_axis_idx = int(np.argmin(np.abs(angles_deg)))
 
@@ -191,6 +234,7 @@ def run_sweep_serial(
             source_axis=frame.axis,
             axial_element_scale=axial_element_scale,
             closed_mesh_validated=True,
+            symmetry_context=symmetry_context,
         )
         freq_results.append(fr)
 
@@ -209,15 +253,26 @@ def run_sweep_serial(
         # so the caller can act on partial results as they stream in.
         if has_callback:
             k_real = 2.0 * np.pi * fr.frequency_hz / SPEED_OF_SOUND
+            field_pressure = (
+                fr.field_pressure_on_surface
+                if fr.field_pressure_on_surface is not None
+                else fr.pressure_on_surface
+            )
+            field_neumann = (
+                fr.field_neumann_data
+                if fr.field_neumann_data is not None
+                else fr.neumann_data
+            )
             per_freq_pressure, per_freq_spl = _evaluate_observation_planes(
-                p1_space,
-                dp0_space,
-                fr.pressure_on_surface,
-                fr.neumann_data,
+                field_pressure.space,
+                field_neumann.space,
+                field_pressure,
+                field_neumann,
                 k_real,
                 obs_points,
                 _ff_op_kwargs,
                 on_axis_idx,
+                config.restrict_neumann_space,
             )
             callback_pressure_rows.append(per_freq_pressure)
             callback_spl_rows.append(per_freq_spl)
@@ -299,17 +354,24 @@ def run_sweep_parallel(
     at observation points, and returns the results. This avoids shipping
     bempp GridFunction objects across process boundaries.
 
-    Callbacks (progress_callback, on_frequency_result) are not supported
-    in parallel mode — they are not picklable across process boundaries.
+    ``progress_callback`` is supported: it stays in the parent process and is
+    driven by a manager queue the workers publish to as each frequency lands.
+    Progress therefore arrives out of order, which is inherent to chunking the
+    sweep.
+
+    ``on_frequency_result`` is not supported. It exists to abort a sweep early,
+    and a worker cannot stop the chunks already running in its siblings, so
+    honouring it here would silently mean something different from serial mode.
     """
     frequencies = np.asarray(frequencies, dtype=np.float64)
     if frequencies.size == 0:
         raise ValueError("frequencies must contain at least one value")
 
-    if config.progress_callback is not None or config.on_frequency_result is not None:
+    if config.on_frequency_result is not None:
         raise ValueError(
-            "progress_callback and on_frequency_result are not supported in "
-            "parallel mode (workers > 1). Use serial mode or set workers=1."
+            "on_frequency_result is not supported in parallel mode "
+            "(workers > 1): early stopping cannot cancel frequencies already "
+            "running in sibling workers. Use serial mode or set workers=1."
         )
 
     if not mesh_contracts_validated:
@@ -348,45 +410,82 @@ def run_sweep_parallel(
     import multiprocessing as mp
     ctx = mp.get_context("spawn")
 
-    with ProcessPoolExecutor(
-        max_workers=len(chunks), mp_context=ctx,
-    ) as executor:
-        futures = {}
-        for chunk_freqs, chunk_idx in zip(chunks, chunk_indices):
-            fut = executor.submit(
-                _worker_solve_chunk,
-                mesh_grid_verts=np.array(mesh.grid.vertices),
-                mesh_grid_elems=np.array(mesh.grid.elements),
-                physical_tags=mesh.physical_tags,
-                frequencies=chunk_freqs,
-                obs_points=obs_points,
-                angles_deg=angles_deg,
-                config=config,
-                source_axis=np.asarray(frame.axis, dtype=np.float64),
-            )
-            futures[fut] = chunk_idx
+    # Callables cannot cross a spawn boundary. The callback stays here and is
+    # fed by a queue the workers publish to.
+    progress_callback = config.progress_callback
+    worker_config = replace(
+        config, progress_callback=None, on_frequency_result=None,
+    )
 
-        for fut in as_completed(futures):
-            idx = futures[fut]
-            (
-                chunk_pressure,
-                chunk_spl,
-                chunk_imp,
-                chunk_log,
-                chunk_surface_pressure,
-            ) = fut.result()
-            for local_i, global_i in enumerate(idx):
-                pressure_all[global_i] = chunk_pressure[local_i]
-                spl_all[global_i] = chunk_spl[local_i]
-                impedance_all[global_i] = chunk_imp[local_i]
-                solver_log[global_i] = chunk_log[local_i]
-                for tag in source_tags:
-                    surface_pressure_all[tag][global_i] = chunk_surface_pressure[tag][
-                        local_i
-                    ]
-            logger.info(
-                "Completed chunk: %d frequencies", len(idx),
-            )
+    manager = ctx.Manager() if progress_callback is not None else None
+    progress_queue = manager.Queue() if manager is not None else None
+    completed = 0
+    total = len(frequencies)
+
+    def drain_progress() -> None:
+        nonlocal completed
+        if progress_queue is None:
+            return
+        while True:
+            try:
+                _global_i, frequency_hz = progress_queue.get_nowait()
+            except queue.Empty:
+                return
+            # Report a monotonic count: chunks finish out of order, so the
+            # frequency index itself would make the bar jump backwards.
+            progress_callback(completed, total, float(frequency_hz))
+            completed += 1
+
+    try:
+        with ProcessPoolExecutor(
+            max_workers=len(chunks), mp_context=ctx,
+        ) as executor:
+            futures = {}
+            for chunk_freqs, chunk_idx in zip(chunks, chunk_indices):
+                fut = executor.submit(
+                    _worker_solve_chunk,
+                    mesh_grid_verts=np.array(mesh.grid.vertices),
+                    mesh_grid_elems=np.array(mesh.grid.elements),
+                    physical_tags=mesh.physical_tags,
+                    frequencies=chunk_freqs,
+                    obs_points=obs_points,
+                    angles_deg=angles_deg,
+                    config=worker_config,
+                    source_axis=np.asarray(frame.axis, dtype=np.float64),
+                    progress_queue=progress_queue,
+                    global_indices=np.asarray(chunk_idx, dtype=np.int64),
+                )
+                futures[fut] = chunk_idx
+
+            pending = set(futures)
+            while pending:
+                done, pending = wait(pending, timeout=0.2)
+                drain_progress()
+                for fut in done:
+                    idx = futures[fut]
+                    (
+                        chunk_pressure,
+                        chunk_spl,
+                        chunk_imp,
+                        chunk_log,
+                        chunk_surface_pressure,
+                    ) = fut.result()
+                    for local_i, global_i in enumerate(idx):
+                        pressure_all[global_i] = chunk_pressure[local_i]
+                        spl_all[global_i] = chunk_spl[local_i]
+                        impedance_all[global_i] = chunk_imp[local_i]
+                        solver_log[global_i] = chunk_log[local_i]
+                        for tag in source_tags:
+                            surface_pressure_all[tag][global_i] = (
+                                chunk_surface_pressure[tag][local_i]
+                            )
+                    logger.info(
+                        "Completed chunk: %d frequencies", len(idx),
+                    )
+            drain_progress()
+    finally:
+        if manager is not None:
+            manager.shutdown()
 
     return SolveResult(
         frequencies_hz=frequencies,
@@ -404,6 +503,17 @@ def run_sweep_parallel(
     )
 
 
+class WorkerSolveError(RuntimeError):
+    """A parallel worker failed; carries the original type and traceback.
+
+    Some exceptions raised deep in the OpenCL stack are not picklable (notably
+    ``pyopencl._cl._ErrorRecord``), and an unpicklable exception surfaces in
+    the parent as ``TypeError: cannot pickle ...``, destroying the real
+    diagnostic exactly the way pyopencl's own cache handler does. Workers
+    therefore report failures as this, which always survives the boundary.
+    """
+
+
 def _worker_solve_chunk(
     mesh_grid_verts,
     mesh_grid_elems,
@@ -413,12 +523,74 @@ def _worker_solve_chunk(
     angles_deg,
     config,
     source_axis=None,
+    progress_queue=None,
+    global_indices=None,
 ):
-    """Worker function: reconstruct grid, solve, evaluate far-field, return arrays."""
+    """Worker entry point; wraps failures so they cross the process boundary."""
+    try:
+        return _worker_solve_chunk_inner(
+            mesh_grid_verts,
+            mesh_grid_elems,
+            physical_tags,
+            frequencies,
+            obs_points,
+            angles_deg,
+            config,
+            source_axis=source_axis,
+            progress_queue=progress_queue,
+            global_indices=global_indices,
+        )
+    except BaseException as exc:
+        import traceback
+
+        raise WorkerSolveError(
+            f"parallel worker failed solving "
+            f"{float(np.min(frequencies)):.1f}-{float(np.max(frequencies)):.1f} Hz "
+            f"with {type(exc).__name__}: {exc}\n"
+            + "".join(traceback.format_exception(exc))
+        ) from None
+
+
+def _worker_solve_chunk_inner(
+    mesh_grid_verts,
+    mesh_grid_elems,
+    physical_tags,
+    frequencies,
+    obs_points,
+    angles_deg,
+    config,
+    source_axis=None,
+    progress_queue=None,
+    global_indices=None,
+):
+    """Reconstruct grid, solve, evaluate far-field, return arrays."""
     import bempp_cl.api as bempp_api
 
     grid = bempp_api.Grid(mesh_grid_verts, mesh_grid_elems)
-    p1_space, dp0_space = _setup_function_spaces(grid)
+    symmetry_context = None
+    if config.native_symmetry_plane is None:
+        p1_space, dp0_space = _setup_function_spaces(grid)
+    else:
+        from .symmetry import build_symmetry_context
+
+        symmetry_context = build_symmetry_context(
+            grid,
+            physical_tags,
+            config.native_symmetry_plane,
+        )
+        if config.require_closed_mesh:
+            _require_closed_surface(
+                np.asarray(
+                    symmetry_context.expanded_grid.vertices,
+                    dtype=np.float64,
+                ).T,
+                np.asarray(
+                    symmetry_context.expanded_grid.elements,
+                    dtype=np.int32,
+                ).T,
+            )
+        p1_space = symmetry_context.reduced_p1
+        dp0_space = symmetry_context.reduced_dp0
 
     n_planes, n_angles, _ = obs_points.shape
     pressure = np.zeros((len(frequencies), n_planes, n_angles), dtype=np.complex128)
@@ -443,7 +615,10 @@ def _worker_solve_chunk(
     on_axis_idx = int(np.argmin(np.abs(angles_deg)))
 
     backend = resolve_assembly_backend(config).effective_backend
-    op_kwargs = _operator_kwargs(backend, config.precision, config.opencl_device)
+    op_kwargs = _operator_kwargs(
+        backend, config.precision, config.opencl_device,
+        vectorization_mode=getattr(config, "vectorization_mode", "auto"),
+    )
 
     for i, freq in enumerate(frequencies):
         fr = solve_single_frequency(
@@ -453,6 +628,7 @@ def _worker_solve_chunk(
             source_axis=source_axis,
             axial_element_scale=axial_element_scale,
             closed_mesh_validated=True,
+            symmetry_context=symmetry_context,
         )
         impedance[i] = fr.impedance
         pavg = compute_surface_pressure_avg(
@@ -467,15 +643,36 @@ def _worker_solve_chunk(
         log_entries.append(_solver_log_entry(fr))
 
         k_real = 2.0 * np.pi * freq / SPEED_OF_SOUND
+        field_pressure = (
+            fr.field_pressure_on_surface
+            if fr.field_pressure_on_surface is not None
+            else fr.pressure_on_surface
+        )
+        field_neumann = (
+            fr.field_neumann_data
+            if fr.field_neumann_data is not None
+            else fr.neumann_data
+        )
         pressure[i], spl[i] = _evaluate_observation_planes(
-            p1_space,
-            dp0_space,
-            fr.pressure_on_surface,
-            fr.neumann_data,
+            field_pressure.space,
+            field_neumann.space,
+            field_pressure,
+            field_neumann,
             k_real,
             obs_points,
             op_kwargs,
             on_axis_idx,
+            config.restrict_neumann_space,
         )
+
+        if progress_queue is not None:
+            global_i = (
+                int(global_indices[i]) if global_indices is not None else i
+            )
+            # Progress reporting must never take the sweep down with it.
+            try:
+                progress_queue.put_nowait((global_i, float(freq)))
+            except Exception:  # pragma: no cover - queue full / manager gone
+                logger.debug("dropped a progress update", exc_info=True)
 
     return pressure, spl, impedance, log_entries, surface_pressure
