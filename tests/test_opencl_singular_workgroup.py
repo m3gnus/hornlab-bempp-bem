@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
+import time
 import types
 
 import numpy as np
@@ -153,6 +155,50 @@ def test_the_global_is_restored_even_when_the_assembly_raises(fake_bempp):
     with pytest.raises(RuntimeError):
         _call(module, POINT_COUNTS_BY_ORDER[4])
 
+    assert module.WORKGROUP_SIZE_GALERKIN == 16
+
+
+def test_concurrent_assemblies_cannot_observe_each_others_tuned_size(
+    fake_bempp,
+):
+    module, _seen = fake_bempp
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+    seen_sizes: list[int] = []
+
+    def recording_assembler(
+        device_interface, operator_descriptor, grid, domain, dual_to_range,
+        test_points, trial_points, quad_weights, test_elements, trial_elements,
+        test_offsets, trial_offsets, weights_offsets, number_of_quad_points,
+        kernel_options, result,
+    ):
+        nonlocal active, max_active
+        with state_lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.02)
+        seen_sizes.append(module.WORKGROUP_SIZE_GALERKIN)
+        with state_lock:
+            active -= 1
+
+    module.singular_assembler = recording_assembler
+    enable_singular_workgroup_tuning()
+
+    threads = [
+        threading.Thread(
+            target=_call,
+            args=(module, POINT_COUNTS_BY_ORDER[order]),
+        )
+        for order in (2, 4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert max_active == 1
+    assert sorted(seen_sizes) == [16, 64]
     assert module.WORKGROUP_SIZE_GALERKIN == 16
 
 

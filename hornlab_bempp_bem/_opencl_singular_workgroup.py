@@ -49,6 +49,7 @@ workgroup of one and becoming an order of magnitude slower.
 from __future__ import annotations
 
 import logging
+import threading
 
 import numpy as np
 
@@ -58,6 +59,13 @@ logger = logging.getLogger(__name__)
 _CANDIDATE_SIZES = (64, 32, 16)
 
 _warned_counts: set[tuple[int, ...]] = set()
+
+# The tuned size lives in a bempp-cl module global. Different solver calls may
+# reach this wrapper from different application threads even though each
+# individual assembler is serial, so the mutation and the complete upstream
+# call must be one critical section. An RLock keeps nested/re-entrant assembly
+# safe without sharing any pyopencl kernel objects between threads.
+_assembly_lock = threading.RLock()
 
 
 def safe_workgroup_size(number_of_quad_points) -> int | None:
@@ -139,15 +147,16 @@ def enable_singular_workgroup_tuning() -> bool:
 
         # The stock assembler reads this module global both for the kernel's
         # compile-time -D WORKGROUP_SIZE and for its local work size, so they
-        # stay consistent. Mutating a global around the call is only safe
-        # because bempp-cl's assemblers are serial within a process; the
-        # parallel sweep uses processes, not threads.
-        previous = opencl_assemblers.WORKGROUP_SIZE_GALERKIN
-        opencl_assemblers.WORKGROUP_SIZE_GALERKIN = size
-        try:
-            return original(*args, **kwargs)
-        finally:
-            opencl_assemblers.WORKGROUP_SIZE_GALERKIN = previous
+        # stay consistent. Hold the lock through the upstream call: setting and
+        # restoring under separate locks would still let another thread observe
+        # (and use) the temporary value.
+        with _assembly_lock:
+            previous = opencl_assemblers.WORKGROUP_SIZE_GALERKIN
+            opencl_assemblers.WORKGROUP_SIZE_GALERKIN = size
+            try:
+                return original(*args, **kwargs)
+            finally:
+                opencl_assemblers.WORKGROUP_SIZE_GALERKIN = previous
 
     tuned_singular_assembler._hornlab_workgroup_tuned = True
     tuned_singular_assembler._hornlab_original = original
