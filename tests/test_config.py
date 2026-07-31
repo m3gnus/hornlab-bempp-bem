@@ -164,6 +164,18 @@ def test_solve_config_accepts_native_symmetry_planes():
     assert SolveConfig(native_symmetry_plane="yz+xz").native_symmetry_plane == "yz+xz"
 
 
+def test_gmres_defaults_and_restart_validation():
+    assert SolveConfig().gmres_tol == 1e-6
+    assert SolveConfig(gmres_restart=100).gmres_restart == 100
+
+    with pytest.raises(ValueError, match="gmres_restart"):
+        SolveConfig(gmres_restart=0)
+    with pytest.raises(ValueError, match="gmres_restart"):
+        SolveConfig(gmres_restart=1.5)
+    with pytest.raises(ValueError, match="gmres_tol"):
+        SolveConfig(gmres_tol=0.0)
+
+
 def test_auto_backend_resolves_to_opencl():
     resolution = resolve_assembly_backend(SolveConfig(assembly_backend="auto"))
     assert resolution.effective_backend == "opencl"

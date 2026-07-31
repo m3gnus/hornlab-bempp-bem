@@ -44,6 +44,8 @@ class SourceMotion:
 
 AssemblyBackend = Literal["opencl", "numba", "auto"]
 NativeSymmetryPlane = Literal["yz", "xz", "xy", "yz+xz"]
+VectorizationMode = Literal["auto", "novec", "vec4", "vec8", "vec16"]
+VECTORIZATION_MODES = ("auto", "novec", "vec4", "vec8", "vec16")
 
 
 def _is_integral_value(value: object) -> bool:
@@ -84,13 +86,15 @@ class SolveConfig:
     formulation: BIEFormulation = BIEFormulation.STANDARD
     complex_k_shift: float = 0.005
     slp_dlp_quadrature: int = 4
+    slp_dlp_singular_quadrature: int = 4
     hyp_adlp_quadrature: int = 4
 
     # Linear solver
     solver: LinearSolver = LinearSolver.GMRES
     lu_threshold: int = 6000
-    gmres_tol: float = 1e-5
+    gmres_tol: float = 1e-6
     gmres_max_iter: int = 5000
+    gmres_restart: int | None = None
 
     # Boundary condition
     velocity_mode: VelocityMode = VelocityMode.ACCELERATION
@@ -125,16 +129,32 @@ class SolveConfig:
     precision: Literal["single", "double"] = "single"
     assembly_backend: AssemblyBackend = "opencl"
     opencl_device: Literal["cpu", "gpu"] = "cpu"
+    # OpenCL kernel vector width. "auto" asks bempp-cl for the device's native
+    # width, which is what it does by default.
+    #
+    # Forcing "vec16" above the native width is worth 1.07-1.09x on assemblies
+    # with a large *trial* space -- measured on the 1209x4552-dof ASRO2 symmetry
+    # path -- and nothing at all on small ones, where it is within noise or
+    # marginally slower. The win depends on the trial count, not the test count,
+    # which is why two independent benchmarks of the same idea disagreed until
+    # they were compared on the same shape. "novec" is 3-5x slower and "vec4"
+    # about 40% slower on this CPU; neither is ever worth selecting.
+    #
+    # Left at "auto" because the useful value depends on the device's native
+    # width, and forcing 16 on hardware that is natively 16 (or 4) has not been
+    # measured. Set it explicitly if you have benchmarked your own host.
+    vectorization_mode: VectorizationMode = "auto"
     native_symmetry_plane: NativeSymmetryPlane | None = None
+    restrict_neumann_space: bool = True
 
     # Mesh scale (applied on load if mesh isn't already in metres)
     mesh_scale: float = 1.0
 
     # Require the loaded mesh to be a closed surface (no open boundary
     # edges). Set by callers solving closed-mode geometries (enclosure /
-    # capped free-standing box): this backend has no symmetry support, so a
-    # closed-mode mesh with open edges is a leaking model that would solve
-    # silently wrong. Also checked for pre-loaded LoadedMesh inputs. On an
+    # capped free-standing box). For a native-symmetry mesh, validation occurs
+    # after mirroring so cut-plane edges are permitted but any other leak is
+    # rejected. Also checked for pre-loaded LoadedMesh inputs. On an
     # intentionally open mesh, Bempp's default P1 pressure space constrains
     # free-boundary DOFs to zero; hornlab-metal-bem's all-vertex P1 space does
     # not, so open-mesh results are not directly comparable across backends.
@@ -183,6 +203,21 @@ class SolveConfig:
         except (TypeError, ValueError):
             raise ValueError("solver must be 'auto', 'lu', or 'gmres'") from None
         try:
+            valid_gmres_tol = isfinite(self.gmres_tol) and self.gmres_tol > 0.0
+        except (TypeError, ValueError):
+            valid_gmres_tol = False
+        if not valid_gmres_tol:
+            raise ValueError("gmres_tol must be finite and greater than zero")
+        if self.gmres_restart is not None:
+            if (
+                not _is_integral_value(self.gmres_restart)
+                or self.gmres_restart < 1
+            ):
+                raise ValueError(
+                    "gmres_restart must be a positive integer or None"
+                )
+            self.gmres_restart = int(self.gmres_restart)
+        try:
             self.velocity_mode = VelocityMode(self.velocity_mode)
         except (TypeError, ValueError):
             raise ValueError(
@@ -194,6 +229,13 @@ class SolveConfig:
             raise ValueError(
                 "assembly_backend must be one of: auto, opencl, numba"
             )
+        if self.vectorization_mode not in VECTORIZATION_MODES:
+            raise ValueError(
+                "vectorization_mode must be one of: "
+                + ", ".join(VECTORIZATION_MODES)
+            )
+        if not isinstance(self.restrict_neumann_space, bool):
+            raise ValueError("restrict_neumann_space must be a boolean")
         if self.native_symmetry_plane not in {None, "yz", "xz", "xy", "yz+xz"}:
             raise ValueError(
                 "native_symmetry_plane must be None, 'yz', 'xz', 'xy', or 'yz+xz'"
@@ -209,12 +251,29 @@ class SolveConfig:
 
 
 def reject_unsupported_native_symmetry(config: SolveConfig) -> None:
-    """Reject reduced-domain symmetry flags that Bempp assembly does not honor."""
+    """Validate symmetry modes implemented by the Bempp image assembler.
+
+    Every unsupported symmetry combination is rejected here, before the mesh is
+    loaded and the symmetry context is built, so a caller learns immediately
+    rather than after the first frequency's assembly.
+    """
+    if config.native_symmetry_plane not in {None, "yz", "xz", "yz+xz"}:
+        raise NotImplementedError(
+            "hornlab-bempp-bem native symmetry supports transverse half/quarter "
+            "models ('yz', 'xz', and 'yz+xz'); legacy 'xy' symmetry is not "
+            "implemented"
+        )
     if config.native_symmetry_plane is None:
         return
-    raise NotImplementedError(
-        "hornlab-bempp-bem accepts native_symmetry_plane for config compatibility, "
-        "but Bempp assembly does not mirror reduced meshes. Use a full free-space "
-        "mesh, or solve with hornlab-metal-bem and "
-        f"native_symmetry_plane={config.native_symmetry_plane!r}."
-    )
+    # Mirrored by the same guards inside assemble_and_solve_symmetry, which
+    # stay as a backstop for callers reaching that function directly.
+    if config.formulation is BIEFormulation.BURTON_MILLER:
+        raise NotImplementedError(
+            "native half/quarter symmetry currently supports STANDARD and "
+            "COMPLEX_K formulations; Burton-Miller is not implemented"
+        )
+    if config.impedance_sources:
+        raise NotImplementedError(
+            "native half/quarter symmetry with Robin impedance boundaries "
+            "is not implemented yet"
+        )

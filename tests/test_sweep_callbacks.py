@@ -48,6 +48,7 @@ def _fake_frequency_result(freq_hz: float):
     fr.iterations = 10
     fr.converged = True
     fr.timing_s = 0.5
+    fr.phase_timings = {"total_s": 0.5, "linear_solve_s": 0.1}
     fr.impedance = 400.0 + 50j
     fr.pressure_on_surface = MagicMock()
     fr.pressure_on_surface.space = MagicMock()
@@ -306,14 +307,66 @@ class TestProgressCallback:
 
 class TestParallelRejectsCallbacks:
 
-    def test_progress_callback_rejected(self):
+    def test_progress_callback_is_supported(self):
+        """It stays in the parent and is fed by a queue the workers publish to.
+
+        ``on_frequency_result`` stays rejected because a worker cannot cancel
+        frequencies already running in its siblings.
+        """
         from hornlab_bempp_bem.sweep import run_sweep_parallel
 
-        config = SolveConfig(progress_callback=lambda i, n, f: None)
-        with pytest.raises(ValueError, match="not supported in parallel mode"):
-            run_sweep_parallel(
-                _make_mesh(), np.array([100.0]), _make_frame(), config, 2,
+        seen = []
+        config = SolveConfig(
+            progress_callback=lambda i, n, f: seen.append((i, n, f)),
+            observation=ObservationConfig(planes=["horizontal"], angle_count=5),
+        )
+        frequencies = np.array([500.0, 1000.0])
+
+        class ImmediateFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self):
+                return self._value
+
+        class InlineExecutor:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def submit(self, fn, **kwargs):
+                return ImmediateFuture(fn(**kwargs))
+
+        def fake_worker(**kwargs):
+            freqs = np.asarray(kwargs["frequencies"], dtype=np.float64)
+            n_planes, n_angles, _ = kwargs["obs_points"].shape
+            for offset, freq in enumerate(freqs):
+                kwargs["progress_queue"].put_nowait(
+                    (int(kwargs["global_indices"][offset]), float(freq)),
+                )
+            return (
+                np.ones((len(freqs), n_planes, n_angles), dtype=np.complex128),
+                np.zeros((len(freqs), n_planes, n_angles), dtype=np.float64),
+                np.full(len(freqs), 400.0 + 50j, dtype=np.complex128),
+                [{"frequency_hz": float(freq)} for freq in freqs],
+                {2: freqs.astype(np.complex128)},
             )
+
+        with patch(f"{_SWEEP}.ProcessPoolExecutor", InlineExecutor), \
+             patch(f"{_SWEEP}.wait", side_effect=lambda fs, timeout=None: (set(fs), set())), \
+             patch(f"{_SWEEP}._worker_solve_chunk", side_effect=fake_worker):
+            run_sweep_parallel(
+                _make_mesh(), frequencies, _make_frame(), config, 2,
+            )
+
+        assert [index for index, _, _ in seen] == [0, 1], "must be monotonic"
+        assert {total for _, total, _ in seen} == {2}
+        assert sorted(freq for _, _, freq in seen) == [500.0, 1000.0]
 
     def test_on_frequency_result_rejected(self):
         from hornlab_bempp_bem.sweep import run_sweep_parallel
@@ -532,7 +585,7 @@ class TestSurfacePressureAvg:
             observation=ObservationConfig(planes=["horizontal"], angle_count=5)
         )
         with patch(f"{_SWEEP}.ProcessPoolExecutor", InlineExecutor), \
-             patch(f"{_SWEEP}.as_completed", side_effect=lambda futures: list(futures)), \
+             patch(f"{_SWEEP}.wait", side_effect=lambda fs, timeout=None: (set(fs), set())), \
              patch(f"{_SWEEP}._worker_solve_chunk", side_effect=fake_worker):
             result = run_sweep_parallel(
                 _make_mesh(), frequencies, _make_frame(), config, worker_count=2

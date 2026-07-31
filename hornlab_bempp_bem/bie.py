@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from numpy.typing import NDArray
 
+from ._blas_threads import limited_blas_threads
 from ._constants import SPEED_OF_SOUND
 from .backends import resolve_assembly_backend
 from .config import (
@@ -36,6 +37,9 @@ class FrequencyResult:
     iterations: int | None
     converged: bool
     timing_s: float
+    phase_timings: dict[str, float] = field(default_factory=dict)
+    field_pressure_on_surface: object | None = None
+    field_neumann_data: object | None = None
 
 
 def _choose_solver(config: SolveConfig, n_triangles: int) -> LinearSolver:
@@ -49,6 +53,8 @@ def _operator_kwargs(
     precision: str,
     opencl_device: str = "cpu",
     quadrature_order: int | None = None,
+    singular_quadrature_order: int | None = None,
+    vectorization_mode: str = "auto",
 ) -> dict:
     """Build kwargs for bempp operator construction."""
     kwargs: dict = {}
@@ -56,16 +62,20 @@ def _operator_kwargs(
         kwargs["assembler"] = "dense"
         kwargs["device_interface"] = backend
     if backend == "opencl":
-        from .device import configure_opencl
+        from .device import configure_opencl, set_vectorization_mode
 
         configure_opencl(opencl_device)
+        set_vectorization_mode(vectorization_mode)
     if precision == "single":
         kwargs["precision"] = "single"
-    if quadrature_order is not None:
+    if quadrature_order is not None or singular_quadrature_order is not None:
         from bempp_cl.api.utils.parameters import DefaultParameters
 
         params = DefaultParameters()
-        params.quadrature.regular = int(quadrature_order)
+        if quadrature_order is not None:
+            params.quadrature.regular = int(quadrature_order)
+        if singular_quadrature_order is not None:
+            params.quadrature.singular = int(singular_quadrature_order)
         kwargs["parameters"] = params
     return kwargs
 
@@ -161,6 +171,34 @@ def _build_neumann_data(
         axial_element_scale=axial_element_scale,
     )
     return bempp_api.GridFunction(dp0_space, coefficients=coeffs)
+
+
+def _restrict_neumann_to_nonzero_support(grid, neumann_fun):
+    """Return a DP0 GridFunction containing only nonzero Neumann elements.
+
+    The Helmholtz SLP is linear in the prescribed Neumann data. Assembling
+    columns for rigid elements whose coefficient is exactly zero cannot affect
+    the RHS, so a restricted DP0 domain is mathematically identical and avoids
+    most SLP work for a small source patch.
+    """
+    import bempp_cl.api as bempp_api
+
+    coefficients = np.asarray(neumann_fun.coefficients)
+    support_elements = np.flatnonzero(coefficients != 0)
+    if support_elements.size == 0 or support_elements.size == coefficients.size:
+        return neumann_fun.space, neumann_fun
+
+    restricted_space = bempp_api.function_space(
+        grid,
+        "DP",
+        0,
+        support_elements=support_elements,
+    )
+    restricted_fun = bempp_api.GridFunction(
+        restricted_space,
+        coefficients=coefficients[support_elements],
+    )
+    return restricted_space, restricted_fun
 
 
 def _build_p1_to_dp0_projection(p1_space, dp0_space):
@@ -275,12 +313,15 @@ def _assemble_and_solve_impedance(
     import bempp_cl.api as bempp_api
     import scipy.linalg
 
+    timings: dict[str, float] = {}
+
     if config.formulation is BIEFormulation.BURTON_MILLER:
         raise NotImplementedError(
             "Robin/impedance BC + Burton-Miller formulation is not "
             "supported. Use formulation=STANDARD or COMPLEX_K."
         )
 
+    start = time.perf_counter()
     identity = bempp_api.operators.boundary.sparse.identity(
         p1_space, p1_space, p1_space,
     )
@@ -290,11 +331,21 @@ def _assemble_and_solve_impedance(
     slp = bempp_api.operators.boundary.helmholtz.single_layer(
         dp0_space, p1_space, p1_space, k, **op_kwargs_low,
     )
+    timings["operator_construction_s"] = time.perf_counter() - start
 
     A_op = dlp - 0.5 * identity
+    start = time.perf_counter()
+    dlp.weak_form()
+    timings["dlp_assembly_s"] = time.perf_counter() - start
+    start = time.perf_counter()
+    slp.weak_form()
+    timings["slp_assembly_s"] = time.perf_counter() - start
+    start = time.perf_counter()
     A_mat = bempp_api.as_matrix(A_op.weak_form())
     V_mat = bempp_api.as_matrix(slp.weak_form())
+    timings["operator_materialization_s"] = time.perf_counter() - start
 
+    start = time.perf_counter()
     dtype_solve = np.complex128
     A_mat = np.asarray(A_mat, dtype=dtype_solve)
     V_mat = np.asarray(V_mat, dtype=dtype_solve)
@@ -326,8 +377,13 @@ def _assemble_and_solve_impedance(
         axial_element_scale=axial_element_scale,
     )
     rhs_vec = V_mat @ g_drv
+    timings["system_build_s"] = time.perf_counter() - start
 
-    p_coeffs = scipy.linalg.solve(lhs_full, rhs_vec)
+    start = time.perf_counter()
+    with limited_blas_threads(1):
+        p_coeffs = scipy.linalg.solve(lhs_full, rhs_vec)
+    timings["linear_solve_s"] = time.perf_counter() - start
+    start = time.perf_counter()
     p_surface = bempp_api.GridFunction(p1_space, coefficients=p_coeffs)
 
     # Build a Neumann GridFunction for downstream far-field evaluation:
@@ -342,8 +398,15 @@ def _assemble_and_solve_impedance(
     neumann_fun = bempp_api.GridFunction(
         dp0_space, coefficients=neumann_total,
     )
+    timings["solution_wrapping_s"] = time.perf_counter() - start
 
-    return p_surface, neumann_fun, None, True  # iterations = None (direct solve)
+    return (
+        p_surface,
+        neumann_fun,
+        None,
+        True,
+        timings,
+    )  # iterations = None (direct solve)
 
 
 def _assemble_and_solve(
@@ -361,6 +424,8 @@ def _assemble_and_solve(
     """Assemble BIE operators and solve the linear system."""
     import bempp_cl.api as bempp_api
 
+    timings: dict[str, float] = {}
+    start = time.perf_counter()
     identity = bempp_api.operators.boundary.sparse.identity(
         p1_space, p1_space, p1_space,
     )
@@ -370,6 +435,7 @@ def _assemble_and_solve(
     slp = bempp_api.operators.boundary.helmholtz.single_layer(
         dp0_space, p1_space, p1_space, k, **op_kwargs_low,
     )
+    timings["operator_construction_s"] = time.perf_counter() - start
 
     if config.formulation is BIEFormulation.BURTON_MILLER:
         hyp = bempp_api.operators.boundary.helmholtz.hypersingular(
@@ -383,35 +449,67 @@ def _assemble_and_solve(
         )
         coupling = 1j / k
         lhs = 0.5 * identity - dlp - coupling * (-hyp)
+        start = time.perf_counter()
+        slp.weak_form()
+        timings["slp_assembly_s"] = time.perf_counter() - start
+        start = time.perf_counter()
+        adlp.weak_form()
+        timings["adlp_assembly_s"] = time.perf_counter() - start
+        start = time.perf_counter()
         rhs = (-slp - coupling * (adlp + 0.5 * rhs_identity)) * neumann_fun
+        timings["rhs_apply_s"] = time.perf_counter() - start
+        start = time.perf_counter()
+        dlp.weak_form()
+        timings["dlp_assembly_s"] = time.perf_counter() - start
+        start = time.perf_counter()
+        hyp.weak_form()
+        timings["hyp_assembly_s"] = time.perf_counter() - start
     else:
         # STANDARD or COMPLEX_K (complex k is already baked into the
         # wavenumber — the BIE structure is the same as STANDARD)
         lhs = dlp - 0.5 * identity
+        start = time.perf_counter()
+        slp.weak_form()
+        timings["slp_assembly_s"] = time.perf_counter() - start
+        start = time.perf_counter()
         rhs = slp * neumann_fun
+        timings["rhs_apply_s"] = time.perf_counter() - start
+        start = time.perf_counter()
+        dlp.weak_form()
+        timings["dlp_assembly_s"] = time.perf_counter() - start
 
+    start = time.perf_counter()
+    lhs.weak_form()
+    timings["lhs_materialization_s"] = time.perf_counter() - start
     solver_choice = _choose_solver(config, n_triangles)
     iterations = None
     converged = True
 
-    if solver_choice is LinearSolver.LU:
-        p_surface = bempp_api.linalg.lu(lhs, rhs)
-    else:
-        result = bempp_api.linalg.gmres(
-            lhs, rhs,
-            tol=config.gmres_tol,
-            maxiter=config.gmres_max_iter,
-            use_strong_form=True,
-            return_iteration_count=True,
-        )
-        p_surface, info, iterations = result
-        converged = info == 0
-        if info != 0:
-            logger.warning(
-                "GMRES did not converge (info=%d) at k=%.4f", info, k_real,
+    start = time.perf_counter()
+    # LAPACK LU and the GMRES inner products both scale negatively with BLAS
+    # threads at these matrix sizes; the limit is scoped so assembly and any
+    # other array work in the process keep their threads. See _blas_threads.
+    with limited_blas_threads(1):
+        if solver_choice is LinearSolver.LU:
+            p_surface = bempp_api.linalg.lu(lhs, rhs)
+        else:
+            result = bempp_api.linalg.gmres(
+                lhs, rhs,
+                tol=config.gmres_tol,
+                restart=config.gmres_restart,
+                maxiter=config.gmres_max_iter,
+                use_strong_form=True,
+                return_iteration_count=True,
             )
+            p_surface, info, iterations = result
+            converged = info == 0
+            if info != 0:
+                logger.warning(
+                    "GMRES did not converge (info=%d) at k=%.4f", info, k_real,
+                )
+    timings["linear_solve_s"] = time.perf_counter() - start
 
-    return p_surface, iterations, converged
+    return p_surface, iterations, converged, timings
 
 
 def _evaluate_far_field(
@@ -422,6 +520,7 @@ def _evaluate_far_field(
     k_real: float,
     obs_points: NDArray[np.float64],
     op_kwargs: dict,
+    restrict_neumann_space: bool = True,
 ) -> NDArray[np.complex128]:
     """Evaluate pressure at observation points via representation formula.
 
@@ -431,6 +530,10 @@ def _evaluate_far_field(
 
     # obs_points: (N, 3) → bempp wants (3, N)
     pts = np.ascontiguousarray(obs_points.T, dtype=np.float64)
+    if restrict_neumann_space:
+        dp0_space, neumann_fun = _restrict_neumann_to_nonzero_support(
+            dp0_space.grid, neumann_fun,
+        )
 
     dlp_pot = bempp_api.operators.potential.helmholtz.double_layer(
         p1_space, pts, k_real, **op_kwargs,
@@ -507,6 +610,7 @@ def solve_single_frequency(
     source_axis: NDArray[np.float64] | None = None,
     closed_mesh_validated: bool = False,
     axial_element_scale: NDArray[np.float64] | None = None,
+    symmetry_context=None,
 ) -> FrequencyResult:
     """Solve the BEM problem at a single frequency.
 
@@ -515,6 +619,14 @@ def solve_single_frequency(
     ∂p/∂n = i·k·β·p directly into the BIE for a single LU solve.
     """
     reject_unsupported_native_symmetry(config)
+    if (
+        config.native_symmetry_plane is not None
+        and config.impedance_sources
+    ):
+        raise NotImplementedError(
+            "native half/quarter symmetry with Robin impedance boundaries "
+            "is not implemented yet"
+        )
     if config.source_motion == SourceMotion.AXIAL and source_axis is None:
         if config.frame_override is not None:
             source_axis = np.asarray(config.frame_override.axis, dtype=np.float64)
@@ -526,17 +638,40 @@ def solve_single_frequency(
                 physical_tags,
                 source_tag=min(config.velocity_sources.keys(), default=2),
                 origin_at=config.observation.origin,
+                # Without the plane the reduced-mesh PCA is quadrant-biased,
+                # and an axis picking up an x/y component makes the per-face
+                # ``n_hat . axis`` drive lose mirror invariance -- which the
+                # even extension in expand_neumann_coefficients assumes.
+                # _resolve_frame on the sweep path already passes this.
+                symmetry_plane=config.native_symmetry_plane,
             ).axis
-    if config.require_closed_mesh and not closed_mesh_validated:
-        _require_closed_surface(
-            np.asarray(grid.vertices, dtype=np.float64).T,
-            np.asarray(grid.elements, dtype=np.int32).T,
+    t0 = time.perf_counter()
+    phase_timings: dict[str, float] = {}
+
+    start = time.perf_counter()
+    if config.native_symmetry_plane is not None and symmetry_context is None:
+        from .symmetry import build_symmetry_context
+
+        symmetry_context = build_symmetry_context(
+            grid, physical_tags, config.native_symmetry_plane,
         )
-
-    t0 = time.time()
-
+    if config.require_closed_mesh and not closed_mesh_validated:
+        validation_grid = (
+            symmetry_context.expanded_grid
+            if symmetry_context is not None
+            else grid
+        )
+        _require_closed_surface(
+            np.asarray(validation_grid.vertices, dtype=np.float64).T,
+            np.asarray(validation_grid.elements, dtype=np.int32).T,
+        )
     if p1_space is None or dp0_space is None:
-        p1_space, dp0_space = _setup_function_spaces(grid)
+        if symmetry_context is None:
+            p1_space, dp0_space = _setup_function_spaces(grid)
+        else:
+            p1_space = symmetry_context.reduced_p1
+            dp0_space = symmetry_context.reduced_dp0
+    phase_timings["function_spaces_s"] = time.perf_counter() - start
 
     omega = 2.0 * np.pi * frequency_hz
     k_real = omega / SPEED_OF_SOUND
@@ -547,13 +682,18 @@ def solve_single_frequency(
     else:
         k = k_real
 
+    start = time.perf_counter()
     backend = resolve_assembly_backend(config).effective_backend
     op_kwargs_low = _operator_kwargs(
         backend, config.precision, config.opencl_device, config.slp_dlp_quadrature,
+        config.slp_dlp_singular_quadrature,
+        vectorization_mode=getattr(config, "vectorization_mode", "auto"),
     )
     op_kwargs_high = _operator_kwargs(
         backend, config.precision, config.opencl_device, config.hyp_adlp_quadrature,
+        vectorization_mode=getattr(config, "vectorization_mode", "auto"),
     )
+    phase_timings["backend_setup_s"] = time.perf_counter() - start
 
     n_tris = grid.number_of_elements
 
@@ -570,15 +710,30 @@ def solve_single_frequency(
                 continue
             active_impedance[tag] = beta
 
+    field_pressure = None
+    field_neumann = None
     if active_impedance:
         impedance_config = replace(config, impedance_sources=active_impedance)
-        p_surface, neumann_fun, iterations, converged = _assemble_and_solve_impedance(
-            grid, p1_space, dp0_space, physical_tags,
-            k, omega, impedance_config, op_kwargs_low,
+        (
+            p_surface,
+            neumann_fun,
+            iterations,
+            converged,
+            core_timings,
+        ) = _assemble_and_solve_impedance(
+            grid,
+            p1_space,
+            dp0_space,
+            physical_tags,
+            k,
+            omega,
+            impedance_config,
+            op_kwargs_low,
             source_axis=source_axis,
             axial_element_scale=axial_element_scale,
         )
     else:
+        start = time.perf_counter()
         neumann_fun = _build_neumann_data(
             dp0_space,
             physical_tags,
@@ -589,17 +744,54 @@ def solve_single_frequency(
             source_axis=source_axis,
             axial_element_scale=axial_element_scale,
         )
-        p_surface, iterations, converged = _assemble_and_solve(
-            grid, p1_space, dp0_space, neumann_fun,
-            k, k_real, config, n_tris, op_kwargs_low, op_kwargs_high,
-        )
+        phase_timings["neumann_data_s"] = time.perf_counter() - start
+        solve_dp0_space = dp0_space
+        solve_neumann_fun = neumann_fun
+        # Under symmetry the restriction happens on the expanded grid inside
+        # assemble_and_solve_symmetry, which needs the unrestricted reduced
+        # trace; restricting here would build a function space per frequency
+        # and then discard it.
+        if config.restrict_neumann_space and symmetry_context is None:
+            start = time.perf_counter()
+            solve_dp0_space, solve_neumann_fun = (
+                _restrict_neumann_to_nonzero_support(grid, neumann_fun)
+            )
+            phase_timings["neumann_restriction_s"] = (
+                time.perf_counter() - start
+            )
+        if symmetry_context is None:
+            p_surface, iterations, converged, core_timings = _assemble_and_solve(
+                grid, p1_space, solve_dp0_space, solve_neumann_fun,
+                k, k_real, config, n_tris, op_kwargs_low, op_kwargs_high,
+            )
+        else:
+            from .symmetry import assemble_and_solve_symmetry
 
+            (
+                p_surface,
+                field_pressure,
+                field_neumann,
+                iterations,
+                converged,
+                core_timings,
+            ) = assemble_and_solve_symmetry(
+                symmetry_context,
+                neumann_fun,
+                k,
+                config,
+                op_kwargs_low,
+            )
+    phase_timings.update(core_timings)
+
+    start = time.perf_counter()
     impedance = _compute_impedance(
         grid, p_surface, physical_tags, p1_space,
         source_tag=min(config.velocity_sources.keys(), default=2),
     )
+    phase_timings["impedance_s"] = time.perf_counter() - start
 
-    elapsed = time.time() - t0
+    elapsed = time.perf_counter() - t0
+    phase_timings["total_s"] = elapsed
     if active_impedance:
         logger.info(
             "%.1f Hz: solved in %.2fs (direct Robin BC)",
@@ -620,4 +812,7 @@ def solve_single_frequency(
         iterations=iterations,
         converged=converged,
         timing_s=elapsed,
+        phase_timings=phase_timings,
+        field_pressure_on_surface=field_pressure,
+        field_neumann_data=field_neumann,
     )

@@ -23,7 +23,10 @@ def test_native_symmetry_module_is_pinned_as_validation_only():
 
     assert doc is not None
     assert "Validation-only" in doc
-    assert "not part of the supported Bempp solve path" in doc
+    # These helpers are a reference implementation kept for parity checks; the
+    # docstring must keep pointing callers at the runtime path so nobody wires
+    # them into a solve.
+    assert "hornlab_bempp_bem.symmetry" in doc
 
 
 def test_expand_quarter_mesh_xy_shares_seams_and_preserves_orbits():

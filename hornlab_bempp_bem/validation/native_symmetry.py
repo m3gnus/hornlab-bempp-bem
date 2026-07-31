@@ -1,11 +1,9 @@
 """Validation-only reference helpers for reduced/full-domain comparisons.
 
-This module is retained to reproduce quarter-mesh expansion and degree-of-
-freedom orbit reductions in validation tests.
-
-It is not part of the supported Bempp solve path. The public solver requires
-full-domain meshes and rejects ``native_symmetry_plane``. Importing these
-helpers does not enable symmetry assembly.
+This module retains the original quarter-only reference helpers used by
+validation tests. The supported runtime implementation lives in
+``hornlab_bempp_bem.symmetry`` and accepts transverse half/quarter models
+through ``SolveConfig.native_symmetry_plane``.
 """
 
 from __future__ import annotations
