@@ -27,7 +27,11 @@ from .mesh import (
     _require_closed_surface,
     _validate_velocity_source_tags,
 )
-from .observation import ObservationFrame, build_observation_points
+from .observation import (
+    ObservationFrame,
+    build_observation_points,
+    build_sphere_grid_points,
+)
 from .result import SolveResult
 
 logger = logging.getLogger(__name__)
@@ -74,20 +78,34 @@ def _evaluate_observation_planes(
     op_kwargs: dict,
     on_axis_idx: int,
     restrict_neumann_space: bool = True,
-) -> tuple[NDArray[np.complex128], NDArray[np.float64]]:
-    """Evaluate all observation planes in one Bempp potential operation."""
+    sphere_points: NDArray[np.float64] | None = None,
+) -> tuple[
+    NDArray[np.complex128],
+    NDArray[np.float64],
+    NDArray[np.complex128] | None,
+]:
+    """Evaluate display planes and an optional sphere in one potential operation."""
     n_planes, n_angles, _ = obs_points.shape
-    pressure = _evaluate_far_field(
+    arc_points = obs_points.reshape(n_planes * n_angles, 3)
+    evaluation_points = (
+        arc_points
+        if sphere_points is None
+        else np.concatenate([arc_points, sphere_points], axis=0)
+    )
+    evaluated = _evaluate_far_field(
         p1_space,
         dp0_space,
         pressure_on_surface,
         neumann_data,
         k_real,
-        obs_points.reshape(n_planes * n_angles, 3),
+        evaluation_points,
         op_kwargs,
         restrict_neumann_space,
-    ).reshape(n_planes, n_angles)
-    return pressure, _normalized_spl_db(pressure, on_axis_idx)
+    )
+    arc_count = n_planes * n_angles
+    pressure = evaluated[:arc_count].reshape(n_planes, n_angles)
+    sphere_pressure = evaluated[arc_count:] if sphere_points is not None else None
+    return pressure, _normalized_spl_db(pressure, on_axis_idx), sphere_pressure
 
 
 def _evaluate_directivity(
@@ -95,7 +113,12 @@ def _evaluate_directivity(
     obs_points: NDArray[np.float64],
     angles_deg: NDArray[np.float64],
     config: SolveConfig,
-) -> tuple[NDArray[np.complex128], NDArray[np.float64]]:
+    sphere_points: NDArray[np.float64] | None = None,
+) -> tuple[
+    NDArray[np.complex128],
+    NDArray[np.float64],
+    NDArray[np.complex128] | None,
+]:
     """Evaluate far-field pressure at observation points for all frequencies.
 
     Returns:
@@ -107,6 +130,11 @@ def _evaluate_directivity(
 
     pressure = np.zeros((n_freq, n_planes, n_angles), dtype=np.complex128)
     spl = np.full((n_freq, n_planes, n_angles), -120.0, dtype=np.float64)
+    sphere_pressure = (
+        np.zeros((n_freq, sphere_points.shape[0]), dtype=np.complex128)
+        if sphere_points is not None
+        else None
+    )
 
     # On-axis index: the angle closest to 0 degrees
     on_axis_idx = int(np.argmin(np.abs(angles_deg)))
@@ -133,7 +161,7 @@ def _evaluate_directivity(
         p1 = field_pressure.space
         dp0 = field_neumann.space
 
-        pressure[fi], spl[fi] = _evaluate_observation_planes(
+        arc_pressure, arc_spl, sphere_row = _evaluate_observation_planes(
             p1,
             dp0,
             field_pressure,
@@ -143,9 +171,13 @@ def _evaluate_directivity(
             op_kwargs,
             on_axis_idx,
             config.restrict_neumann_space,
+            sphere_points,
         )
+        pressure[fi], spl[fi] = arc_pressure, arc_spl
+        if sphere_pressure is not None and sphere_row is not None:
+            sphere_pressure[fi] = sphere_row
 
-    return pressure, spl
+    return pressure, spl, sphere_pressure
 
 
 def run_sweep_serial(
@@ -174,6 +206,13 @@ def run_sweep_serial(
             )
 
     obs_points, angles_deg = build_observation_points(frame, config.observation)
+    sphere_points = None
+    sphere_theta_deg = None
+    sphere_phi_deg = None
+    if config.observation.sphere_grid is not None:
+        sphere_points, sphere_theta_deg, sphere_phi_deg = build_sphere_grid_points(
+            frame, config.observation,
+        )
 
     symmetry_context = None
     if config.native_symmetry_plane is None:
@@ -217,6 +256,7 @@ def run_sweep_serial(
     has_callback = config.on_frequency_result is not None
     callback_pressure_rows: list[NDArray[np.complex128]] = []
     callback_spl_rows: list[NDArray[np.float64]] = []
+    callback_sphere_rows: list[NDArray[np.complex128]] = []
     if has_callback:
         _backend = resolve_assembly_backend(config).effective_backend
         _ff_op_kwargs = _operator_kwargs(
@@ -263,7 +303,7 @@ def run_sweep_serial(
                 if fr.field_neumann_data is not None
                 else fr.neumann_data
             )
-            per_freq_pressure, per_freq_spl = _evaluate_observation_planes(
+            per_freq_pressure, per_freq_spl, per_freq_sphere = _evaluate_observation_planes(
                 field_pressure.space,
                 field_neumann.space,
                 field_pressure,
@@ -273,12 +313,16 @@ def run_sweep_serial(
                 _ff_op_kwargs,
                 on_axis_idx,
                 config.restrict_neumann_space,
+                sphere_points,
             )
             callback_pressure_rows.append(per_freq_pressure)
             callback_spl_rows.append(per_freq_spl)
             log_entry["observation_spl_db"] = per_freq_spl
             log_entry["observation_angles_deg"] = angles_deg
             log_entry["observation_planes"] = config.observation.planes
+            if per_freq_sphere is not None:
+                callback_sphere_rows.append(per_freq_sphere)
+                log_entry["observation_sphere_pressure_complex"] = per_freq_sphere
 
         # Progress callback
         if config.progress_callback is not None:
@@ -297,12 +341,17 @@ def run_sweep_serial(
         t_dir = 0.0
         pressure = np.stack(callback_pressure_rows, axis=0)
         spl = np.stack(callback_spl_rows, axis=0)
+        sphere_pressure = (
+            np.stack(callback_sphere_rows, axis=0)
+            if sphere_points is not None
+            else None
+        )
     else:
         logger.info("Evaluating directivity at %d observation points...",
                     obs_points.shape[1] * obs_points.shape[0])
         t_dir = time.time()
-        pressure, spl = _evaluate_directivity(
-            freq_results, obs_points, angles_deg, config,
+        pressure, spl, sphere_pressure = _evaluate_directivity(
+            freq_results, obs_points, angles_deg, config, sphere_points,
         )
         t_dir = time.time() - t_dir
 
@@ -336,6 +385,9 @@ def run_sweep_serial(
         },
         solver_log=solver_log,
         surface_pressure_avg=sp_avg if sp_avg else None,
+        sphere_pressure_complex=sphere_pressure,
+        sphere_theta_deg=sphere_theta_deg,
+        sphere_phi_deg=sphere_phi_deg,
     )
 
 
@@ -386,6 +438,13 @@ def run_sweep_parallel(
 
     t_total = time.time()
     obs_points, angles_deg = build_observation_points(frame, config.observation)
+    sphere_points = None
+    sphere_theta_deg = None
+    sphere_phi_deg = None
+    if config.observation.sphere_grid is not None:
+        sphere_points, sphere_theta_deg, sphere_phi_deg = build_sphere_grid_points(
+            frame, config.observation,
+        )
 
     chunks = np.array_split(frequencies, min(worker_count, len(frequencies)))
     chunk_indices = np.array_split(
@@ -398,6 +457,11 @@ def run_sweep_parallel(
     )
     spl_all = np.full(
         (len(frequencies), n_planes, n_angles), -120.0, dtype=np.float64,
+    )
+    sphere_pressure_all = (
+        np.zeros((len(frequencies), sphere_points.shape[0]), dtype=np.complex128)
+        if sphere_points is not None
+        else None
     )
     impedance_all = np.zeros(len(frequencies), dtype=np.complex128)
     source_tags = list(config.velocity_sources.keys())
@@ -449,6 +513,7 @@ def run_sweep_parallel(
                     physical_tags=mesh.physical_tags,
                     frequencies=chunk_freqs,
                     obs_points=obs_points,
+                    sphere_points=sphere_points,
                     angles_deg=angles_deg,
                     config=worker_config,
                     source_axis=np.asarray(frame.axis, dtype=np.float64),
@@ -469,6 +534,7 @@ def run_sweep_parallel(
                         chunk_imp,
                         chunk_log,
                         chunk_surface_pressure,
+                        chunk_sphere_pressure,
                     ) = fut.result()
                     for local_i, global_i in enumerate(idx):
                         pressure_all[global_i] = chunk_pressure[local_i]
@@ -479,6 +545,11 @@ def run_sweep_parallel(
                             surface_pressure_all[tag][global_i] = (
                                 chunk_surface_pressure[tag][local_i]
                             )
+                        if (
+                            sphere_pressure_all is not None
+                            and chunk_sphere_pressure is not None
+                        ):
+                            sphere_pressure_all[global_i] = chunk_sphere_pressure[local_i]
                     logger.info(
                         "Completed chunk: %d frequencies", len(idx),
                     )
@@ -500,6 +571,9 @@ def run_sweep_parallel(
         timings={"total_s": time.time() - t_total},
         solver_log=solver_log,
         surface_pressure_avg=surface_pressure_all if surface_pressure_all else None,
+        sphere_pressure_complex=sphere_pressure_all,
+        sphere_theta_deg=sphere_theta_deg,
+        sphere_phi_deg=sphere_phi_deg,
     )
 
 
@@ -522,6 +596,7 @@ def _worker_solve_chunk(
     obs_points,
     angles_deg,
     config,
+    sphere_points=None,
     source_axis=None,
     progress_queue=None,
     global_indices=None,
@@ -536,6 +611,7 @@ def _worker_solve_chunk(
             obs_points,
             angles_deg,
             config,
+            sphere_points=sphere_points,
             source_axis=source_axis,
             progress_queue=progress_queue,
             global_indices=global_indices,
@@ -559,6 +635,7 @@ def _worker_solve_chunk_inner(
     obs_points,
     angles_deg,
     config,
+    sphere_points=None,
     source_axis=None,
     progress_queue=None,
     global_indices=None,
@@ -595,6 +672,11 @@ def _worker_solve_chunk_inner(
     n_planes, n_angles, _ = obs_points.shape
     pressure = np.zeros((len(frequencies), n_planes, n_angles), dtype=np.complex128)
     spl = np.full((len(frequencies), n_planes, n_angles), -120.0)
+    sphere_pressure = (
+        np.zeros((len(frequencies), sphere_points.shape[0]), dtype=np.complex128)
+        if sphere_points is not None
+        else None
+    )
     impedance = np.zeros(len(frequencies), dtype=np.complex128)
     source_tags = list(config.velocity_sources.keys())
     axial_element_scale = None
@@ -653,7 +735,7 @@ def _worker_solve_chunk_inner(
             if fr.field_neumann_data is not None
             else fr.neumann_data
         )
-        pressure[i], spl[i] = _evaluate_observation_planes(
+        arc_pressure, arc_spl, sphere_row = _evaluate_observation_planes(
             field_pressure.space,
             field_neumann.space,
             field_pressure,
@@ -663,7 +745,11 @@ def _worker_solve_chunk_inner(
             op_kwargs,
             on_axis_idx,
             config.restrict_neumann_space,
+            sphere_points,
         )
+        pressure[i], spl[i] = arc_pressure, arc_spl
+        if sphere_pressure is not None and sphere_row is not None:
+            sphere_pressure[i] = sphere_row
 
         if progress_queue is not None:
             global_i = (
@@ -675,4 +761,4 @@ def _worker_solve_chunk_inner(
             except Exception:  # pragma: no cover - queue full / manager gone
                 logger.debug("dropped a progress update", exc_info=True)
 
-    return pressure, spl, impedance, log_entries, surface_pressure
+    return pressure, spl, impedance, log_entries, surface_pressure, sphere_pressure

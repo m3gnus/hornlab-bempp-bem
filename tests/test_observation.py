@@ -14,6 +14,7 @@ from hornlab_bempp_bem.config import ObservationConfig
 from hornlab_bempp_bem.observation import (
     ObservationFrame,
     build_observation_points,
+    build_sphere_grid_points,
     infer_frame,
 )
 
@@ -172,6 +173,23 @@ class TestStandardObservationPoints:
         cfg = ObservationConfig(planes=["foobar"])
         with pytest.raises(ValueError, match="Unknown plane"):
             build_observation_points(frame, cfg)
+
+
+def test_sphere_grid_uses_frame_origin_basis_and_theta_major_order():
+    frame = _make_frame(origin=np.array([1.0, 2.0, 3.0]))
+    config = ObservationConfig(
+        distance_m=2.0,
+        sphere_grid=(3, 4),
+        sphere_theta_max_deg=90.0,
+    )
+
+    points, theta, phi = build_sphere_grid_points(frame, config)
+
+    assert points.shape == (12, 3)
+    np.testing.assert_allclose(theta, np.repeat([0.0, 45.0, 90.0], 4))
+    np.testing.assert_allclose(phi, np.tile([0.0, 90.0, 180.0, 270.0], 3))
+    np.testing.assert_allclose(points[0], frame.origin + 2.0 * frame.axis)
+    np.testing.assert_allclose(points[8], frame.origin + 2.0 * frame.u, atol=1e-12)
 
 
 # ---------------------------------------------------------------------------

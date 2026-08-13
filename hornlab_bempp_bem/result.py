@@ -44,6 +44,12 @@ class SolveResult:
     # tag -> (F,) complex array. Populated when velocity_sources has tags.
     surface_pressure_avg: dict[int, NDArray[np.complex128]] | None = None
 
+    # Optional frame-relative spherical pressure field. Pressure is (F, M),
+    # while theta/phi are flattened theta-major coordinate arrays of length M.
+    sphere_pressure_complex: NDArray[np.complex128] | None = None
+    sphere_theta_deg: NDArray[np.float64] | None = None
+    sphere_phi_deg: NDArray[np.float64] | None = None
+
     @property
     def directivity_db(self) -> NDArray[np.float64]:
         """hornlab_metal_bem-compatible name for spl_db."""

@@ -19,6 +19,20 @@ from hornlab_bempp_bem.config import (
 def test_observation_config_custom_points_defaults_none():
     cfg = ObservationConfig()
     assert cfg.custom_points is None
+    assert cfg.sphere_grid is None
+    assert cfg.sphere_theta_max_deg == 180.0
+
+
+@pytest.mark.parametrize("grid", [(1, 8), (5, 2), (2.5, 8), (500, 500)])
+def test_observation_config_rejects_invalid_sphere_grid(grid):
+    with pytest.raises(ValueError, match="sphere_grid"):
+        ObservationConfig(sphere_grid=grid)
+
+
+def test_observation_config_normalizes_integral_sphere_grid():
+    config = ObservationConfig(sphere_grid=(5.0, 8.0))
+
+    assert config.sphere_grid == (5, 8)
 
 
 def test_solve_config_frame_override_defaults_none():

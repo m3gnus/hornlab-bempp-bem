@@ -46,6 +46,7 @@ AssemblyBackend = Literal["opencl", "numba", "auto"]
 NativeSymmetryPlane = Literal["yz", "xz", "xy", "yz+xz"]
 VectorizationMode = Literal["auto", "novec", "vec4", "vec8", "vec16"]
 VECTORIZATION_MODES = ("auto", "novec", "vec4", "vec8", "vec16")
+_MAX_SPHERE_POINTS = 100_000
 
 
 def _is_integral_value(value: object) -> bool:
@@ -71,6 +72,34 @@ class ObservationConfig:
     # When set, build_observation_points() returns these directly
     # instead of constructing polar arcs from the frame.
     custom_points: dict[str, NDArray[np.float64]] | None = None
+
+    # Frame-relative spherical field grid as (n_theta, n_phi). Theta spans
+    # [0, sphere_theta_max_deg] inclusive and phi spans [0, 360) without a
+    # duplicate wrap column. The result is theta-major and uses the same
+    # observation frame, origin, and distance as the requested polar cuts.
+    sphere_grid: tuple[int, int] | None = None
+    sphere_theta_max_deg: float = 180.0
+
+    def __post_init__(self) -> None:
+        if self.sphere_grid is not None:
+            grid = tuple(self.sphere_grid)
+            if len(grid) != 2:
+                raise ValueError("sphere_grid must be (n_theta, n_phi)")
+            if not all(_is_integral_value(value) for value in grid):
+                raise ValueError("sphere_grid counts must be integers")
+            n_theta, n_phi = int(grid[0]), int(grid[1])
+            if n_theta < 2:
+                raise ValueError("sphere_grid n_theta must be at least 2")
+            if n_phi < 3:
+                raise ValueError("sphere_grid n_phi must be at least 3")
+            if n_theta * n_phi > _MAX_SPHERE_POINTS:
+                raise ValueError(
+                    "sphere_grid is too dense "
+                    f"(n_theta*n_phi > {_MAX_SPHERE_POINTS})"
+                )
+            self.sphere_grid = (n_theta, n_phi)
+        if not (0.0 < float(self.sphere_theta_max_deg) <= 180.0):
+            raise ValueError("sphere_theta_max_deg must be in (0, 180]")
 
 
 @dataclass

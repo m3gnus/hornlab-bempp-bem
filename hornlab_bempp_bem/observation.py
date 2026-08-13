@@ -313,3 +313,37 @@ def build_observation_points(
 
     points = np.stack(plane_points, axis=0)  # (P, N_angles, 3)
     return points, angles_deg
+
+
+def build_sphere_grid_points(
+    frame: ObservationFrame,
+    config: ObservationConfig,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Build the frame-relative spherical field grid requested by the caller.
+
+    Theta is measured from the forward axis and phi rotates from the horizontal
+    ``u`` basis toward ``v``. Points are returned theta-major so the pressure
+    result can be reshaped directly to ``(n_theta, n_phi)``.
+    """
+
+    if config.sphere_grid is None:
+        raise ValueError("build_sphere_grid_points requires sphere_grid to be set")
+    n_theta, n_phi = config.sphere_grid
+    theta_axis = np.linspace(0.0, float(config.sphere_theta_max_deg), n_theta)
+    phi_axis = np.arange(n_phi, dtype=np.float64) * (360.0 / n_phi)
+    theta_deg = np.repeat(theta_axis, n_phi)
+    phi_deg = np.tile(phi_axis, n_theta)
+    theta_rad = np.deg2rad(theta_deg)
+    phi_rad = np.deg2rad(phi_deg)
+    sin_theta = np.sin(theta_rad)
+    directions = (
+        (sin_theta * np.cos(phi_rad))[:, None] * frame.u[None, :]
+        + (sin_theta * np.sin(phi_rad))[:, None] * frame.v[None, :]
+        + np.cos(theta_rad)[:, None] * frame.axis[None, :]
+    )
+    points = frame.origin[None, :] + float(config.distance_m) * directions
+    return (
+        np.ascontiguousarray(points, dtype=np.float64),
+        theta_deg,
+        phi_deg,
+    )

@@ -213,6 +213,7 @@ config = SolveConfig(
         angle_max_deg=180.0,
         angle_count=37,
         origin="mouth",
+        sphere_grid=(37, 72),
     )
 )
 ```
@@ -222,6 +223,12 @@ Allowed plane names are `"horizontal"`, `"vertical"`, and `"diagonal"`.
 For exact observation coordinates, set `custom_points` to a mapping of plane
 name to an `(N, 3)` array in metres. All requested planes must be present and
 must have the same point count.
+
+`sphere_grid=(n_theta, n_phi)` additionally evaluates a frame-relative
+spherical field from the same solved system. Theta runs from the forward axis
+through `sphere_theta_max_deg` (180° by default); phi wraps around the axis
+without a duplicate 360° column. This field is independent of the selected
+display planes and is suitable for solid-angle directivity integration.
 
 ## Formulations
 
@@ -282,6 +289,8 @@ Key result fields:
 - `observation_points`: `(P, N, 3)` observation coordinates in metres
 - `observation_planes`: plane names matching axis `P`
 - `surface_pressure_avg`: source-tag keyed average surface pressure arrays
+- `sphere_pressure_complex`: optional `(F, n_theta*n_phi)` spherical pressure
+- `sphere_theta_deg`, `sphere_phi_deg`: optional theta-major sphere coordinates
 - `timings` and `solver_log`: backend timing and diagnostic metadata
 
 `spl_db` and `directivity_db` are not absolute SPL. Use `pressure_complex` for
