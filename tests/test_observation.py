@@ -170,9 +170,19 @@ class TestStandardObservationPoints:
 
     def test_unknown_plane_raises(self):
         frame = _make_frame()
-        cfg = ObservationConfig(planes=["foobar"])
+        cfg = ObservationConfig()
+        cfg.planes = ["foobar"]
         with pytest.raises(ValueError, match="Unknown plane"):
             build_observation_points(frame, cfg)
+
+
+def test_sphere_only_observation_points_have_zero_plane_shape():
+    config = ObservationConfig(planes=[], angle_count=5, sphere_grid=(3, 4))
+
+    points, angles = build_observation_points(_make_frame(), config)
+
+    assert points.shape == (0, 5, 3)
+    np.testing.assert_allclose(angles, [0.0, 45.0, 90.0, 135.0, 180.0])
 
 
 def test_sphere_grid_uses_frame_origin_basis_and_theta_major_order():
@@ -190,6 +200,55 @@ def test_sphere_grid_uses_frame_origin_basis_and_theta_major_order():
     np.testing.assert_allclose(phi, np.tile([0.0, 90.0, 180.0, 270.0], 3))
     np.testing.assert_allclose(points[0], frame.origin + 2.0 * frame.axis)
     np.testing.assert_allclose(points[8], frame.origin + 2.0 * frame.u, atol=1e-12)
+
+
+def _midpoint_cell_solid_angle_weights(
+    theta_deg: np.ndarray,
+    phi_deg: np.ndarray,
+    theta_max_deg: float,
+) -> np.ndarray:
+    """Replicate the consumer's midpoint-cell integration weights."""
+    theta_axis = np.unique(theta_deg)
+    phi_axis = np.unique(phi_deg)
+    theta_edges = np.empty(theta_axis.size + 1, dtype=np.float64)
+    theta_edges[0] = 0.0
+    theta_edges[-1] = theta_max_deg
+    theta_edges[1:-1] = 0.5 * (theta_axis[:-1] + theta_axis[1:])
+    theta_edges = np.deg2rad(theta_edges)
+    theta_weights = np.cos(theta_edges[:-1]) - np.cos(theta_edges[1:])
+    return np.repeat(theta_weights * (2.0 * np.pi / phi_axis.size), phi_axis.size)
+
+
+@pytest.mark.parametrize(
+    ("theta_max_deg", "expected_solid_angle"),
+    [(180.0, 4.0 * np.pi), (90.0, 2.0 * np.pi)],
+)
+def test_sphere_midpoint_cell_weights_sum_to_sampled_solid_angle(
+    theta_max_deg,
+    expected_solid_angle,
+):
+    config = ObservationConfig(
+        sphere_grid=(37, 72), sphere_theta_max_deg=theta_max_deg,
+    )
+    _points, theta, phi = build_sphere_grid_points(_make_frame(), config)
+
+    weights = _midpoint_cell_solid_angle_weights(theta, phi, theta_max_deg)
+
+    assert weights.sum() == pytest.approx(expected_solid_angle)
+
+
+def test_uniform_spherical_pressure_has_zero_db_directivity_index():
+    config = ObservationConfig(sphere_grid=(37, 72))
+    _points, theta, phi = build_sphere_grid_points(_make_frame(), config)
+    weights = _midpoint_cell_solid_angle_weights(theta, phi, 180.0)
+    pressure = np.full(theta.shape, 2.0 - 3.0j, dtype=np.complex128)
+    intensity = np.abs(pressure) ** 2
+
+    mean_intensity = np.sum(intensity * weights) / np.sum(weights)
+    on_axis_intensity = intensity[np.flatnonzero(theta == 0.0)[0]]
+    directivity_index_db = 10.0 * np.log10(on_axis_intensity / mean_intensity)
+
+    assert directivity_index_db == pytest.approx(0.0, abs=1e-12)
 
 
 # ---------------------------------------------------------------------------

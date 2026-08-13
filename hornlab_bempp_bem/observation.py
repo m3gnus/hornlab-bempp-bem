@@ -217,7 +217,12 @@ def infer_frame(
     u /= np.linalg.norm(u)
     v = np.cross(axis, u)
 
-    origin = mouth_center.copy() if origin_at == "mouth" else source_center.copy()
+    if origin_at == "mouth":
+        origin = mouth_center.copy()
+    elif origin_at == "throat":
+        origin = source_center.copy()
+    else:
+        raise ValueError("origin_at must be 'mouth' or 'throat'")
 
     # Project origin onto symmetry plane for half/quarter models. The
     # half-mesh has vertices at X>=0 (yz symmetry) or Z>=0 (xy), but the
@@ -250,11 +255,14 @@ def build_observation_points(
         points: (P, N_angles, 3) array of observation positions
         angles_deg: (N_angles,) array of angles in degrees
     """
+    angles_deg = np.linspace(
+        config.angle_min_deg, config.angle_max_deg, config.angle_count,
+    )
+    if not config.planes:
+        return np.empty((0, config.angle_count, 3), dtype=np.float64), angles_deg
+
     if config.custom_points is not None:
         # Custom observation grids — caller provides exact coordinates.
-        angles_deg = np.linspace(
-            config.angle_min_deg, config.angle_max_deg, config.angle_count,
-        )
         plane_points = []
         for plane in config.planes:
             if plane not in config.custom_points:
@@ -285,9 +293,6 @@ def build_observation_points(
         points = np.stack(plane_points, axis=0)  # (P, N_points, 3)
         return points, angles_deg
 
-    angles_deg = np.linspace(
-        config.angle_min_deg, config.angle_max_deg, config.angle_count,
-    )
     angles_rad = np.deg2rad(angles_deg)
     r = config.distance_m
 

@@ -81,8 +81,37 @@ class ObservationConfig:
     sphere_theta_max_deg: float = 180.0
 
     def __post_init__(self) -> None:
+        try:
+            distance_m = float(self.distance_m)
+        except (TypeError, ValueError, OverflowError):
+            distance_m = float("nan")
+        if not isfinite(distance_m) or distance_m <= 0.0:
+            raise ValueError("distance_m must be finite and greater than zero")
+        self.distance_m = distance_m
+
+        for field_name in ("angle_min_deg", "angle_max_deg"):
+            try:
+                value = float(getattr(self, field_name))
+            except (TypeError, ValueError, OverflowError):
+                value = float("nan")
+            if not isfinite(value):
+                raise ValueError(f"{field_name} must be finite")
+            setattr(self, field_name, value)
+
+        if not _is_integral_value(self.angle_count) or self.angle_count < 1:
+            raise ValueError("angle_count must be a positive integer")
+        self.angle_count = int(self.angle_count)
+
+        if self.origin not in ("mouth", "throat"):
+            raise ValueError("origin must be 'mouth' or 'throat'")
+
         if self.sphere_grid is not None:
-            grid = tuple(self.sphere_grid)
+            try:
+                grid = tuple(self.sphere_grid)
+            except TypeError:
+                raise ValueError(
+                    "sphere_grid must be an iterable (n_theta, n_phi)"
+                ) from None
             if len(grid) != 2:
                 raise ValueError("sphere_grid must be (n_theta, n_phi)")
             if not all(_is_integral_value(value) for value in grid):
@@ -98,8 +127,30 @@ class ObservationConfig:
                     f"(n_theta*n_phi > {_MAX_SPHERE_POINTS})"
                 )
             self.sphere_grid = (n_theta, n_phi)
-        if not (0.0 < float(self.sphere_theta_max_deg) <= 180.0):
+
+        if not isinstance(self.planes, list):
+            raise ValueError("planes must be a list of plane names")
+        if not all(isinstance(plane, str) and plane for plane in self.planes):
+            raise ValueError("planes must be a list of non-empty plane names")
+        if len(set(self.planes)) != len(self.planes):
+            raise ValueError("planes must not contain duplicates")
+        if not self.planes and self.sphere_grid is None:
+            raise ValueError("planes may be empty only when sphere_grid is set")
+        if self.custom_points is None:
+            unknown_planes = set(self.planes) - {
+                "horizontal", "vertical", "diagonal",
+            }
+            if unknown_planes:
+                names = ", ".join(sorted(repr(name) for name in unknown_planes))
+                raise ValueError(f"planes contain unknown name(s): {names}")
+
+        try:
+            sphere_theta_max_deg = float(self.sphere_theta_max_deg)
+        except (TypeError, ValueError, OverflowError):
+            sphere_theta_max_deg = float("nan")
+        if not (0.0 < sphere_theta_max_deg <= 180.0):
             raise ValueError("sphere_theta_max_deg must be in (0, 180]")
+        self.sphere_theta_max_deg = sphere_theta_max_deg
 
 
 @dataclass

@@ -23,7 +23,7 @@ def test_observation_config_custom_points_defaults_none():
     assert cfg.sphere_theta_max_deg == 180.0
 
 
-@pytest.mark.parametrize("grid", [(1, 8), (5, 2), (2.5, 8), (500, 500)])
+@pytest.mark.parametrize("grid", [(1, 8), (5, 2), (2.5, 8), (500, 500), 5])
 def test_observation_config_rejects_invalid_sphere_grid(grid):
     with pytest.raises(ValueError, match="sphere_grid"):
         ObservationConfig(sphere_grid=grid)
@@ -33,6 +33,49 @@ def test_observation_config_normalizes_integral_sphere_grid():
     config = ObservationConfig(sphere_grid=(5.0, 8.0))
 
     assert config.sphere_grid == (5, 8)
+
+
+@pytest.mark.parametrize("distance_m", [np.nan, 0.0, -1.0])
+def test_observation_config_rejects_invalid_distance(distance_m):
+    with pytest.raises(ValueError, match="distance_m"):
+        ObservationConfig(distance_m=distance_m)
+
+
+def test_observation_config_rejects_unknown_origin():
+    with pytest.raises(ValueError, match="origin"):
+        ObservationConfig(origin="speaker")  # type: ignore[arg-type]
+
+
+def test_observation_config_rejects_zero_angle_count():
+    with pytest.raises(ValueError, match="angle_count"):
+        ObservationConfig(angle_count=0)
+
+
+@pytest.mark.parametrize("field", ["angle_min_deg", "angle_max_deg"])
+def test_observation_config_rejects_nonfinite_angle_bounds(field):
+    with pytest.raises(ValueError, match=field):
+        ObservationConfig(**{field: np.nan})
+
+
+@pytest.mark.parametrize(
+    "planes",
+    [
+        [],
+        "horizontal",
+        ["horizontal", 5],
+        ["horizontal", "horizontal"],
+        ["foobar"],
+    ],
+)
+def test_observation_config_rejects_malformed_planes(planes):
+    with pytest.raises(ValueError, match="planes"):
+        ObservationConfig(planes=planes)  # type: ignore[arg-type]
+
+
+def test_observation_config_allows_no_planes_with_sphere_grid():
+    config = ObservationConfig(planes=[], sphere_grid=(3, 4))
+
+    assert config.planes == []
 
 
 def test_solve_config_frame_override_defaults_none():

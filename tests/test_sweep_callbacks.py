@@ -332,6 +332,37 @@ def test_serial_result_publishes_spherical_pressure_and_coordinates():
     np.testing.assert_allclose(result.sphere_phi_deg, np.tile([0.0, 90.0, 180.0, 270.0], 3))
 
 
+def test_serial_sphere_only_sweep_evaluates_without_display_planes():
+    from hornlab_bempp_bem.sweep import run_sweep_serial
+
+    patches = _standard_sweep_patches()
+    frequencies = np.array([500.0, 1000.0])
+    patches["ff"] = patch(
+        f"{_SWEEP}._evaluate_far_field",
+        return_value=np.ones(12, dtype=np.complex128),
+    )
+    config = SolveConfig(
+        observation=ObservationConfig(
+            planes=[], angle_count=5, sphere_grid=(3, 4),
+        ),
+    )
+
+    with patches["spaces"], patches["solve"], patches["pavg"], \
+         patches["ff"] as far_field, patches["op_kw"]:
+        result = run_sweep_serial(_make_mesh(), frequencies, _make_frame(), config)
+
+    assert far_field.call_count == len(frequencies)
+    assert all(call.args[5].shape == (12, 3) for call in far_field.call_args_list)
+    assert result.observation_planes == []
+    assert result.observation_points.shape == (0, 5, 3)
+    assert result.pressure_complex.shape == (2, 0, 5)
+    assert result.spl_db.shape == (2, 0, 5)
+    np.testing.assert_array_equal(
+        result.sphere_pressure_complex,
+        np.ones((2, 12), dtype=np.complex128),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Progress callback
 # ---------------------------------------------------------------------------
