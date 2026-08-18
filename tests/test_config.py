@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from hornlab_bempp_bem.backends import resolve_assembly_backend
+from hornlab_bempp_bem.backends import (
+    resolve_assembly_backend,
+    resolve_fastest_backend,
+)
 from hornlab_bempp_bem.config import (
     BIEFormulation,
     LinearSolver,
@@ -249,6 +252,35 @@ def test_opencl_backend_reports_optional_dependency_install(monkeypatch):
     with pytest.raises(OpenCLError, match=r"hornlab-bempp-bem\[opencl\]"):
         configure_opencl("cpu")
     configure_opencl.cache_clear()
+
+
+def test_fastest_backend_prefers_opencl_and_honours_an_explicit_name():
+    resolution = resolve_fastest_backend("auto")
+    assert resolution.effective_backend == "opencl"
+    assert resolution.fallback_used is False
+
+    # Naming a backend outright is taken as given, including the slow one.
+    assert resolve_fastest_backend("numba").effective_backend == "numba"
+    assert resolve_fastest_backend("opencl").effective_backend == "opencl"
+    with pytest.raises(ValueError, match="assembly_backend"):
+        resolve_fastest_backend("cuda")
+
+
+def test_fastest_backend_falls_back_to_numba_without_an_opencl_device(monkeypatch):
+    """Field evaluation must still run where the solve's hard failure would not."""
+
+    import sys
+
+    from hornlab_bempp_bem.device import configure_opencl
+
+    configure_opencl.cache_clear()
+    monkeypatch.setitem(sys.modules, "pyopencl", None)
+    resolution = resolve_fastest_backend("auto")
+    configure_opencl.cache_clear()
+
+    assert resolution.effective_backend == "numba"
+    assert resolution.fallback_used is True
+    assert "PyOpenCL" in (resolution.reason or "")
 
 
 def test_solve_config_callbacks_accept_callables():

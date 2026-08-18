@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import inspect
+
 import numpy as np
 import pytest
 
 import hornlab_bempp_bem as bempp_bem
 from hornlab_bempp_bem._constants import SPEED_OF_SOUND
+from hornlab_bempp_bem.backends import resolve_fastest_backend
 from hornlab_bempp_bem.config import BIEFormulation, LinearSolver
 from hornlab_bempp_bem.mesh import LoadedMesh
 from hornlab_bempp_bem.result import MeshInfo
@@ -115,6 +118,7 @@ def _evaluate_result(
     result: bempp_bem.SolveResult,
     *,
     symmetry_plane: str | None = None,
+    assembly_backend: str = "auto",
 ) -> np.ndarray:
     assert result.surface_pressure_complex is not None
     assert result.surface_neumann_complex is not None
@@ -130,6 +134,7 @@ def _evaluate_result(
                 result.surface_neumann_complex[index],
                 result.observation_points.reshape(-1, 3),
                 symmetry_plane=symmetry_plane,
+                assembly_backend=assembly_backend,
             ).reshape(result.pressure_complex.shape[1:])
         )
     return np.stack(rows, axis=0)
@@ -168,6 +173,33 @@ def test_rigid_multifrequency_traces_reproduce_observation_pressure():
         0.0,
     )
     _assert_trace_parity(_evaluate_result(mesh, result), result.pressure_complex)
+
+
+def test_default_backend_is_the_fastest_one_and_agrees_with_numba():
+    """The default must not quietly be the slow backend.
+
+    ``field_traces`` originally defaulted to Numba while every other entry
+    point defaulted to OpenCL, which cost this path roughly three times the
+    per-process kernel compile and twice the evaluation for an answer that is
+    the same to machine precision. Pin both halves of that: the default
+    resolves to the fastest available backend, and it still agrees with Numba.
+    """
+
+    assert (
+        inspect.signature(bempp_bem.evaluate_exterior_from_traces)
+        .parameters["assembly_backend"]
+        .default
+        == "auto"
+    )
+    if resolve_fastest_backend("auto").effective_backend == "numba":
+        pytest.skip("no OpenCL device here, so the two paths are one path")
+
+    mesh = _tetrahedron_mesh()
+    result = bempp_bem.solve_frequencies(mesh, _FREQUENCIES, _config())
+    _assert_trace_parity(
+        _evaluate_result(mesh, result),
+        _evaluate_result(mesh, result, assembly_backend="numba"),
+    )
 
 
 @pytest.mark.slow

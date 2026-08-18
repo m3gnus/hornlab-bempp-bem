@@ -8,6 +8,7 @@ from typing import Any, Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from .backends import resolve_fastest_backend
 from .bie import _evaluate_far_field, _operator_kwargs, _setup_function_spaces
 from .config import VECTORIZATION_MODES
 from .mesh import LoadedMesh
@@ -53,7 +54,7 @@ def evaluate_exterior_from_traces(
     points_xyz: NDArray[Any],
     *,
     symmetry_plane: str | None = None,
-    assembly_backend: Literal["opencl", "numba"] = "numba",
+    assembly_backend: Literal["auto", "opencl", "numba"] = "auto",
     precision: Literal["single", "double"] = "double",
     opencl_device: Literal["cpu", "gpu"] = "cpu",
     vectorization_mode: str = "auto",
@@ -83,8 +84,13 @@ def evaluate_exterior_from_traces(
         ``"yz+xz"``. Coefficients remain in the reduced mesh's DOF order and
         are expanded through the same image map used by the solve.
     assembly_backend, precision, opencl_device, vectorization_mode:
-        Bempp potential-operator settings. The cross-platform defaults use the
-        NumPy/Numba backend in double precision.
+        Bempp potential-operator settings, in double precision. The default
+        ``"auto"`` picks the fastest backend the machine can actually run,
+        matching :class:`~hornlab_bempp_bem.config.SolveConfig`: OpenCL when a
+        device initializes, Numba otherwise. Naming one outright takes it as
+        given. Prefer ``"auto"`` -- the two agree to machine precision, while
+        Numba costs about three times the one-off per-process kernel compile
+        and twice the steady-state evaluation.
     restrict_neumann_space:
         Restrict the single-layer potential to nonzero DP0 support, matching
         the solve-time field evaluator's default.
@@ -109,8 +115,8 @@ def evaluate_exterior_from_traces(
         raise ValueError("k_real must be finite and positive")
     if symmetry_plane not in {None, "yz", "xz", "yz+xz"}:
         raise ValueError("symmetry_plane must be None, 'yz', 'xz', or 'yz+xz'")
-    if assembly_backend not in {"opencl", "numba"}:
-        raise ValueError("assembly_backend must be 'opencl' or 'numba'")
+    if assembly_backend not in {"auto", "opencl", "numba"}:
+        raise ValueError("assembly_backend must be 'auto', 'opencl' or 'numba'")
     if precision not in {"single", "double"}:
         raise ValueError("precision must be 'single' or 'double'")
     if vectorization_mode not in VECTORIZATION_MODES:
@@ -173,8 +179,13 @@ def evaluate_exterior_from_traces(
         p1_space = context.full_p1
         dp0_space = context.full_dp0
 
+    # Resolve after the geometry work above, so a machine with no OpenCL device
+    # pays the probe only on a call that was going to assemble anyway.
+    resolution = resolve_fastest_backend(
+        assembly_backend, opencl_device=opencl_device,
+    )
     op_kwargs = _operator_kwargs(
-        assembly_backend,
+        resolution.effective_backend,
         precision,
         opencl_device,
         vectorization_mode=vectorization_mode,
