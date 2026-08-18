@@ -227,6 +227,11 @@ class SolveConfig:
     native_symmetry_plane: NativeSymmetryPlane | None = None
     restrict_neumann_space: bool = True
 
+    # Retain the complete P1 pressure and total DP0 Neumann traces needed to
+    # re-evaluate the exterior field after the solve. Robin faces include the
+    # pressure-dependent contribution enforced by the assembled system.
+    return_surface_traces: bool = False
+
     # Mesh scale (applied on load if mesh isn't already in metres)
     mesh_scale: float = 1.0
 
@@ -316,6 +321,8 @@ class SolveConfig:
             )
         if not isinstance(self.restrict_neumann_space, bool):
             raise ValueError("restrict_neumann_space must be a boolean")
+        if not isinstance(self.return_surface_traces, bool):
+            raise ValueError("return_surface_traces must be a boolean")
         if self.native_symmetry_plane not in {None, "yz", "xz", "xy", "yz+xz"}:
             raise ValueError(
                 "native_symmetry_plane must be None, 'yz', 'xz', 'xy', or 'yz+xz'"

@@ -18,6 +18,19 @@ class MeshInfo:
 
 @dataclass
 class SolveResult:
+    r"""Bempp BEM solve output.
+
+    Array dimensions use ``F`` for frequency count, ``P`` for observation
+    plane count, and ``N`` for points or angles per plane. Complex values use
+    the solver's :math:`e^{-i\omega t}` phase convention, which is the same
+    convention used by hornlab-metal-bem.
+
+    ``surface_pressure_complex`` is the optional P1 pressure trace with shape
+    ``(F, n_p1_dofs)``. ``surface_neumann_complex`` is the optional *total*
+    DP0 outward-normal derivative ``dp/dn`` with shape ``(F, n_dp0_dofs)``;
+    its Robin faces include ``q_driver + i*k*beta*p_dp0`` using the same
+    P1-to-DP0 projection as the assembled system.
+    """
 
     frequencies_hz: NDArray[np.float64]
 
@@ -43,6 +56,15 @@ class SolveResult:
     # Area-weighted average surface pressure per velocity-source tag.
     # tag -> (F,) complex array. Populated when velocity_sources has tags.
     surface_pressure_avg: dict[int, NDArray[np.complex128]] | None = None
+
+    # Optional solved P1 pressure coefficients, shape (F, n_p1_dofs), in
+    # Bempp space DOF order and the e^{-i omega t} phase convention.
+    surface_pressure_complex: NDArray[np.complex128] | None = None
+
+    # Optional total outward-normal derivative q = dp/dn on DP0, shape
+    # (F, n_dp0_dofs), in Bempp space DOF order and the e^{-i omega t}
+    # convention. Robin faces include q_driver + i*k*beta*p_dp0.
+    surface_neumann_complex: NDArray[np.complex128] | None = None
 
     # Optional frame-relative spherical pressure field. Pressure is (F, M),
     # while theta/phi are flattened theta-major coordinate arrays of length M.

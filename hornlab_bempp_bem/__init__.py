@@ -27,6 +27,7 @@ from .config import (
     reject_unsupported_native_symmetry,
 )
 from .device import OpenCLError, configure_opencl
+from .field_traces import evaluate_exterior_from_traces
 from .mesh import (
     LoadedMesh,
     MeshError,
@@ -57,6 +58,7 @@ __all__ = [
     "AssemblyBackendResolution",
     "AssemblyBackendUnavailable",
     "resolve_assembly_backend",
+    "evaluate_exterior_from_traces",
 ]
 
 logger = logging.getLogger(__name__)

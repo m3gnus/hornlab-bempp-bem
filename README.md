@@ -108,6 +108,8 @@ Common fields:
 - `native_symmetry_plane`, one of `None`, `"yz"`, `"xz"`, or `"yz+xz"`
 - `restrict_neumann_space`, exactly omit rigid-wall zero Neumann columns from
   boundary and potential assembly
+- `return_surface_traces`, retain P1 pressure and total DP0 Neumann
+  coefficients for post-solve exterior-field evaluation
 - `progress_callback`
 - `on_frequency_result`, for streaming progress and early stop
 
@@ -289,12 +291,22 @@ Key result fields:
 - `observation_points`: `(P, N, 3)` observation coordinates in metres
 - `observation_planes`: plane names matching axis `P`
 - `surface_pressure_avg`: source-tag keyed average surface pressure arrays
+- `surface_pressure_complex`: optional `(F, n_p1_dofs)` P1 pressure
+  coefficients when `return_surface_traces=True`
+- `surface_neumann_complex`: optional `(F, n_dp0_dofs)` total `dp/dn`, including
+  the Robin contribution, when `return_surface_traces=True`
 - `sphere_pressure_complex`: optional `(F, n_theta*n_phi)` spherical pressure
 - `sphere_theta_deg`, `sphere_phi_deg`: optional theta-major sphere coordinates
 - `timings` and `solver_log`: backend timing and diagnostic metadata
 
 `spl_db` and `directivity_db` are not absolute SPL. Use `pressure_complex` for
 absolute complex pressure and derive SPL explicitly when needed.
+
+`evaluate_exterior_from_traces()` applies the same `DLP(p) - SLP(q)`
+representation formula as solve-time observation evaluation. Trace arrays are
+in Bempp P1/DP0 coefficient order and must be paired with the same mesh
+connectivity and ordering. Complex pressure and both traces use the
+`e^{-i omega t}` convention, the same convention as hornlab-metal-bem.
 
 ## Install
 
