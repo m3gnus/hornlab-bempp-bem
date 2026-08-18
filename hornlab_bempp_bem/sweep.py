@@ -48,6 +48,33 @@ def _solver_log_entry(fr: FrequencyResult) -> dict:
     }
 
 
+def _retained_surface_traces(
+    freq_results: list[FrequencyResult],
+    enabled: bool,
+) -> tuple[
+    NDArray[np.complex128] | None,
+    NDArray[np.complex128] | None,
+]:
+    """Stack solve-space P1 pressure and total DP0 Neumann coefficients."""
+    if not enabled:
+        return None, None
+    pressure = np.stack(
+        [
+            np.asarray(fr.pressure_on_surface.coefficients, dtype=np.complex128)
+            for fr in freq_results
+        ],
+        axis=0,
+    )
+    neumann = np.stack(
+        [
+            np.asarray(fr.neumann_data.coefficients, dtype=np.complex128)
+            for fr in freq_results
+        ],
+        axis=0,
+    )
+    return pressure, neumann
+
+
 def _build_frequency_grid(config: SolveConfig) -> NDArray[np.float64]:
     if config.freq_spacing == "log":
         return np.geomspace(config.freq_min_hz, config.freq_max_hz, config.freq_count)
@@ -366,6 +393,10 @@ def run_sweep_serial(
     for tag in source_tags:
         sp_avg[tag] = np.array(surface_pavg[tag], dtype=np.complex128)
 
+    surface_pressure_traces, surface_neumann_traces = _retained_surface_traces(
+        freq_results, config.return_surface_traces,
+    )
+
     return SolveResult(
         frequencies_hz=np.array(
             frequencies[:len(freq_results)], dtype=np.float64,
@@ -385,6 +416,8 @@ def run_sweep_serial(
         },
         solver_log=solver_log,
         surface_pressure_avg=sp_avg if sp_avg else None,
+        surface_pressure_complex=surface_pressure_traces,
+        surface_neumann_complex=surface_neumann_traces,
         sphere_pressure_complex=sphere_pressure,
         sphere_theta_deg=sphere_theta_deg,
         sphere_phi_deg=sphere_phi_deg,
@@ -469,6 +502,8 @@ def run_sweep_parallel(
         tag: np.zeros(len(frequencies), dtype=np.complex128)
         for tag in source_tags
     }
+    surface_pressure_traces_all = None
+    surface_neumann_traces_all = None
     solver_log: list[dict] = [{}] * len(frequencies)
 
     import multiprocessing as mp
@@ -528,14 +563,38 @@ def run_sweep_parallel(
                 drain_progress()
                 for fut in done:
                     idx = futures[fut]
-                    (
-                        chunk_pressure,
-                        chunk_spl,
-                        chunk_imp,
-                        chunk_log,
-                        chunk_surface_pressure,
-                        chunk_sphere_pressure,
-                    ) = fut.result()
+                    worker_result = fut.result()
+                    if config.return_surface_traces:
+                        (
+                            chunk_pressure,
+                            chunk_spl,
+                            chunk_imp,
+                            chunk_log,
+                            chunk_surface_pressure,
+                            chunk_sphere_pressure,
+                            chunk_pressure_traces,
+                            chunk_neumann_traces,
+                        ) = worker_result
+                        if surface_pressure_traces_all is None:
+                            surface_pressure_traces_all = np.zeros(
+                                (len(frequencies), chunk_pressure_traces.shape[1]),
+                                dtype=np.complex128,
+                            )
+                            surface_neumann_traces_all = np.zeros(
+                                (len(frequencies), chunk_neumann_traces.shape[1]),
+                                dtype=np.complex128,
+                            )
+                    else:
+                        (
+                            chunk_pressure,
+                            chunk_spl,
+                            chunk_imp,
+                            chunk_log,
+                            chunk_surface_pressure,
+                            chunk_sphere_pressure,
+                        ) = worker_result
+                        chunk_pressure_traces = None
+                        chunk_neumann_traces = None
                     for local_i, global_i in enumerate(idx):
                         pressure_all[global_i] = chunk_pressure[local_i]
                         spl_all[global_i] = chunk_spl[local_i]
@@ -544,6 +603,18 @@ def run_sweep_parallel(
                         for tag in source_tags:
                             surface_pressure_all[tag][global_i] = (
                                 chunk_surface_pressure[tag][local_i]
+                            )
+                        if (
+                            surface_pressure_traces_all is not None
+                            and surface_neumann_traces_all is not None
+                            and chunk_pressure_traces is not None
+                            and chunk_neumann_traces is not None
+                        ):
+                            surface_pressure_traces_all[global_i] = (
+                                chunk_pressure_traces[local_i]
+                            )
+                            surface_neumann_traces_all[global_i] = (
+                                chunk_neumann_traces[local_i]
                             )
                         if (
                             sphere_pressure_all is not None
@@ -571,6 +642,8 @@ def run_sweep_parallel(
         timings={"total_s": time.time() - t_total},
         solver_log=solver_log,
         surface_pressure_avg=surface_pressure_all if surface_pressure_all else None,
+        surface_pressure_complex=surface_pressure_traces_all,
+        surface_neumann_complex=surface_neumann_traces_all,
         sphere_pressure_complex=sphere_pressure_all,
         sphere_theta_deg=sphere_theta_deg,
         sphere_phi_deg=sphere_phi_deg,
@@ -692,6 +765,8 @@ def _worker_solve_chunk_inner(
         for tag in source_tags
     }
     log_entries = []
+    pressure_trace_rows = [] if config.return_surface_traces else None
+    neumann_trace_rows = [] if config.return_surface_traces else None
 
     # On-axis index: the angle closest to 0 degrees
     on_axis_idx = int(np.argmin(np.abs(angles_deg)))
@@ -723,6 +798,16 @@ def _worker_solve_chunk_inner(
         for tag in source_tags:
             surface_pressure[tag][i] = pavg[tag]
         log_entries.append(_solver_log_entry(fr))
+        if pressure_trace_rows is not None and neumann_trace_rows is not None:
+            pressure_trace_rows.append(
+                np.asarray(
+                    fr.pressure_on_surface.coefficients,
+                    dtype=np.complex128,
+                )
+            )
+            neumann_trace_rows.append(
+                np.asarray(fr.neumann_data.coefficients, dtype=np.complex128)
+            )
 
         k_real = 2.0 * np.pi * freq / SPEED_OF_SOUND
         field_pressure = (
@@ -761,4 +846,18 @@ def _worker_solve_chunk_inner(
             except Exception:  # pragma: no cover - queue full / manager gone
                 logger.debug("dropped a progress update", exc_info=True)
 
-    return pressure, spl, impedance, log_entries, surface_pressure, sphere_pressure
+    result = (
+        pressure,
+        spl,
+        impedance,
+        log_entries,
+        surface_pressure,
+        sphere_pressure,
+    )
+    if pressure_trace_rows is None or neumann_trace_rows is None:
+        return result
+    return (
+        *result,
+        np.stack(pressure_trace_rows, axis=0),
+        np.stack(neumann_trace_rows, axis=0),
+    )
