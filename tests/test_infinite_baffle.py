@@ -137,6 +137,24 @@ def _frame(depth: float = 0.004) -> ObservationFrame:
     )
 
 
+def _channel_meridian(radius: float = 0.04, depth: float = 0.004):
+    metal_bem = pytest.importorskip("hornlab_metal_bem")
+    target_edge = radius / 2.0
+    control = np.asarray(
+        [[0.0, -depth], [radius, -depth], [radius, 0.0], [0.0, 0.0]],
+        dtype=np.float64,
+    )
+    edge_tags = [TAG_THROAT, TAG_WALL, TAG_APERTURE]
+    points = [control[0]]
+    tags: list[int] = []
+    for start, end, tag in zip(control[:-1], control[1:], edge_tags, strict=True):
+        count = max(1, int(np.ceil(float(np.linalg.norm(end - start)) / target_edge)))
+        for index in range(1, count + 1):
+            points.append(start + (end - start) * (index / count))
+            tags.append(tag)
+    return metal_bem.MeridianMesh.from_polyline(np.asarray(points), np.asarray(tags))
+
+
 def _config(**overrides) -> SolveConfig:
     values = dict(
         aperture_tag=TAG_APERTURE,
@@ -216,3 +234,59 @@ def test_bempp_coupled_ib_solves_forward_only_and_enforces_aperture_continuity()
     assert diagnostics["field"] == "rayleigh_aperture_only"
     assert diagnostics["aperture_velocity_basis"] == "DP0"
     assert diagnostics["aperture_pressure_continuity_rel"] < 1.0e-10
+
+
+@pytest.mark.slow
+def test_bempp_coupled_ib_matches_portable_circsym_absolute_field():
+    """Cross-package gate catches normalized-pattern and global phase/sign drift."""
+
+    metal_bem = pytest.importorskip("hornlab_metal_bem")
+    from hornlab_metal_bem.config import (
+        ObservationConfig as MetalObservationConfig,
+        SolveConfig as MetalSolveConfig,
+        VelocityMode as MetalVelocityMode,
+    )
+
+    frequency = 1000.0
+    bempp_result = bempp_bem.solve_frequencies(
+        _channel_mesh(), [frequency], _config()
+    )
+    circsym_result = metal_bem.solve_circsym_frequencies(
+        _channel_meridian(),
+        [frequency],
+        MetalSolveConfig(
+            circsym_aperture_tag=TAG_APERTURE,
+            velocity_sources={TAG_THROAT: 1.0},
+            velocity_mode=MetalVelocityMode.VELOCITY,
+            observation=MetalObservationConfig(
+                planes=["horizontal"],
+                distance_m=1.5,
+                angle_min_deg=0.0,
+                angle_max_deg=180.0,
+                angle_count=7,
+                origin="mouth",
+            ),
+        ),
+    )
+
+    np.testing.assert_allclose(
+        bempp_result.observation_angles_deg,
+        circsym_result.observation_angles_deg,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        bempp_result.spl_db[0, 0, :4],
+        circsym_result.directivity_db[0, 0, :4],
+        atol=0.25,
+    )
+    assert bempp_result.pressure_complex[0, 0, -1] == 0.0
+    assert circsym_result.pressure_complex[0, 0, -1] == 0.0
+
+    bempp_on_axis = bempp_result.pressure_complex[0, 0, 0]
+    circsym_on_axis = circsym_result.pressure_complex[0, 0, 0]
+    amplitude_ratio = abs(bempp_on_axis) / abs(circsym_on_axis)
+    phase_delta_deg = abs(
+        np.rad2deg(np.angle(bempp_on_axis / circsym_on_axis))
+    )
+    assert amplitude_ratio == pytest.approx(1.0, rel=0.15)
+    assert phase_delta_deg < 8.0
