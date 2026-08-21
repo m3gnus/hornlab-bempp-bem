@@ -23,6 +23,7 @@ class LoadedMesh:
     grid: object  # bempp.api.Grid
     physical_tags: NDArray[np.int32]
     info: MeshInfo
+    coupled_ib_aperture_tag: int | None = None
 
 
 class MeshError(Exception):
@@ -37,6 +38,7 @@ def load_mesh(
     repair_normals: bool = False,
     require_closed: bool = False,
     native_symmetry_plane: str | None = None,
+    aperture_tag: int | None = None,
 ) -> LoadedMesh:
     """Load a .msh file into a bempp Grid with physical group tags.
 
@@ -90,10 +92,19 @@ def load_mesh(
         triangles = triangles[valid]
         phys_tags = phys_tags[valid]
 
-    edge_incidence = (
-        _edge_incidence_counts(triangles) if require_closed or validate else None
+    coupled_ib_aperture_tag = _resolve_coupled_ib_aperture_tag(
+        phys_group_names,
+        phys_tags,
+        aperture_tag,
     )
-    if require_closed:
+
+    require_closed_effective = require_closed or coupled_ib_aperture_tag is not None
+    edge_incidence = (
+        _edge_incidence_counts(triangles)
+        if require_closed_effective or validate
+        else None
+    )
+    if require_closed_effective:
         _require_closed_surface(
             verts, triangles, edge_incidence=edge_incidence,
         )
@@ -115,6 +126,7 @@ def load_mesh(
             triangles,
             repair=repair_normals,
             edge_incidence=edge_incidence,
+            interior_domain=coupled_ib_aperture_tag is not None,
         )
         _validate_physical_groups(phys_tags)
         _warn_if_inverted_open_shell(
@@ -135,7 +147,63 @@ def load_mesh(
         info.n_vertices, info.n_triangles, info.physical_groups,
     )
 
-    return LoadedMesh(grid=grid, physical_tags=phys_tags, info=info)
+    return LoadedMesh(
+        grid=grid,
+        physical_tags=phys_tags,
+        info=info,
+        coupled_ib_aperture_tag=coupled_ib_aperture_tag,
+    )
+
+
+def _resolve_coupled_ib_aperture_tag(
+    physical_group_names: dict[int, str],
+    physical_tags: NDArray[np.int32],
+    explicit_tag: int | None,
+) -> int | None:
+    """Resolve explicit or canonical ``mouth_aperture`` metadata.
+
+    A raw numeric tag never enables infinite-baffle physics implicitly. This
+    keeps legacy meshes that happen to use tag 12 on an ordinary boundary from
+    silently changing meaning.
+    """
+    if explicit_tag is not None:
+        if (
+            isinstance(explicit_tag, bool)
+            or not isinstance(explicit_tag, (int, np.integer))
+            or int(explicit_tag) <= 0
+        ):
+            raise MeshError("aperture_tag must be a positive int or None")
+        explicit = int(explicit_tag)
+    else:
+        explicit = None
+
+    named = sorted(
+        int(tag)
+        for tag, name in physical_group_names.items()
+        if str(name).strip().lower() == "mouth_aperture"
+    )
+    if len(named) > 1:
+        raise MeshError(
+            "Mesh declares more than one mouth_aperture physical group: "
+            f"{named}"
+        )
+    named_tag = named[0] if named else None
+    available = {int(tag) for tag in np.unique(physical_tags)}
+    if explicit is not None and explicit not in available:
+        raise MeshError(
+            f"aperture_tag {explicit} is not present in the mesh; "
+            f"available physical tags: {sorted(available)}"
+        )
+    if named_tag is not None and named_tag not in available:
+        raise MeshError(
+            f"mouth_aperture physical tag {named_tag} is not present in the mesh"
+        )
+    if explicit is not None and named_tag is not None and explicit != named_tag:
+        raise MeshError(
+            f"Explicit aperture_tag {explicit} conflicts with canonical "
+            f"mouth_aperture physical tag {named_tag}"
+        )
+    return explicit if explicit is not None else named_tag
 
 
 def _extract_physical_names(path: Path) -> dict[int, str]:
@@ -226,6 +294,7 @@ def _validate_outward_normals(
     *,
     repair: bool = False,
     edge_incidence: tuple[NDArray[np.int32], NDArray[np.int64]] | None = None,
+    interior_domain: bool = False,
 ) -> None:
     """Validate outward winding, optionally repairing legacy external meshes."""
     if not _is_closed_two_manifold(tris, edge_incidence=edge_incidence):
@@ -235,6 +304,15 @@ def _validate_outward_normals(
         return
 
     signed_vol = _signed_mesh_volume_indicator(verts, tris)
+    if interior_domain:
+        if signed_vol < 0:
+            return
+        raise MeshError(
+            "Coupled infinite-baffle mesh winding appears inverse (signed "
+            "volume positive). The closed mesh must use interior-domain "
+            "orientation, with aperture normals pointing into the cavity."
+        )
+
     if signed_vol >= 0:
         return
 
