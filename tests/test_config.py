@@ -254,7 +254,13 @@ def test_opencl_backend_reports_optional_dependency_install(monkeypatch):
     configure_opencl.cache_clear()
 
 
-def test_fastest_backend_prefers_opencl_and_honours_an_explicit_name():
+def test_fastest_backend_prefers_opencl_and_honours_an_explicit_name(monkeypatch):
+    # This is a resolution-policy test, independent of whether the CI host has
+    # an actual OpenCL ICD/device installed.
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.configure_opencl",
+        lambda _device: SimpleNamespace(),
+    )
     resolution = resolve_fastest_backend("auto")
     assert resolution.effective_backend == "opencl"
     assert resolution.fallback_used is False
