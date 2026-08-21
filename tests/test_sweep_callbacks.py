@@ -4,6 +4,7 @@ These tests mock out bempp-cl internals to test the sweep logic in isolation.
 """
 from __future__ import annotations
 
+import queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -450,9 +451,12 @@ class TestParallelRejectsCallbacks:
                 None,
             )
 
+        inline_context = MagicMock()
+        inline_context.Manager.return_value.Queue.return_value = queue.Queue()
         with patch(f"{_SWEEP}.ProcessPoolExecutor", InlineExecutor), \
              patch(f"{_SWEEP}.wait", side_effect=lambda fs, timeout=None: (set(fs), set())), \
-             patch(f"{_SWEEP}._worker_solve_chunk", side_effect=fake_worker):
+             patch(f"{_SWEEP}._worker_solve_chunk", side_effect=fake_worker), \
+             patch("multiprocessing.get_context", return_value=inline_context):
             run_sweep_parallel(
                 _make_mesh(), frequencies, _make_frame(), config, 2,
             )
