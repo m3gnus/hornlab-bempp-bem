@@ -50,6 +50,8 @@ def _fake_frequency_result(freq_hz: float):
     fr.converged = True
     fr.timing_s = 0.5
     fr.phase_timings = {"total_s": 0.5, "linear_solve_s": 0.1}
+    fr.requested_precision = "single"
+    fr.effective_precision = "single"
     fr.impedance = 400.0 + 50j
     fr.pressure_on_surface = MagicMock()
     fr.pressure_on_surface.space = MagicMock()

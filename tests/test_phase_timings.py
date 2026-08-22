@@ -21,6 +21,8 @@ def test_solver_log_carries_phase_timings():
         converged=True,
         timing_s=0.75,
         phase_timings={"slp_assembly_s": 0.2, "linear_solve_s": 0.1},
+        requested_precision="single",
+        effective_precision="double",
     )
 
     entry = _solver_log_entry(result)
@@ -30,6 +32,61 @@ def test_solver_log_carries_phase_timings():
         "linear_solve_s": 0.1,
     }
     assert entry["phase_timings"] is not result.phase_timings
+    assert entry["requested_precision"] == "single"
+    assert entry["effective_precision"] == "double"
+
+
+def test_robin_solve_promotes_the_complete_precision_contract():
+    from hornlab_bempp_bem.bie import solve_single_frequency
+
+    grid = MagicMock()
+    grid.number_of_elements = 2
+    tags = np.array([1, 2], dtype=np.int32)
+    p1_space = MagicMock()
+    dp0_space = MagicMock()
+    operator_precisions = []
+
+    def capture_operator_kwargs(_backend, precision, *_args, **_kwargs):
+        operator_precisions.append(precision)
+        return {}
+
+    with (
+        patch(
+            "hornlab_bempp_bem.bie.resolve_assembly_backend",
+            return_value=SimpleNamespace(effective_backend="numba"),
+        ),
+        patch(
+            "hornlab_bempp_bem.bie._operator_kwargs",
+            side_effect=capture_operator_kwargs,
+        ),
+        patch(
+            "hornlab_bempp_bem.bie._assemble_and_solve_impedance",
+            return_value=(MagicMock(), MagicMock(), None, True, {}),
+        ) as assemble,
+        patch(
+            "hornlab_bempp_bem.bie._compute_impedance",
+            return_value=4.0 + 5.0j,
+        ),
+    ):
+        result = solve_single_frequency(
+            grid,
+            tags,
+            1000.0,
+            SolveConfig(
+                assembly_backend="numba",
+                precision="single",
+                impedance_sources={1: 0.05},
+            ),
+            p1_space=p1_space,
+            dp0_space=dp0_space,
+            closed_mesh_validated=True,
+        )
+
+    assert operator_precisions == ["double", "double"]
+    impedance_config = assemble.call_args.args[6]
+    assert impedance_config.precision == "double"
+    assert result.requested_precision == "single"
+    assert result.effective_precision == "double"
 
 
 def test_single_frequency_reports_setup_core_and_impedance_phases():

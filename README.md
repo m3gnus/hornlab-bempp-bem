@@ -108,6 +108,9 @@ Common fields:
 - `air_density`
 - `require_closed_mesh`, reject open or non-manifold surfaces before solving
 - `assembly_backend`, one of `"opencl"`, `"numba"`, or `"auto"`
+- `precision`, `"single"` (default) or `"double"`; Robin impedance solves
+  explicitly promote operator assembly, the direct system, and retained traces
+  to double precision, and expose requested/effective precision in `solver_log`
 - `opencl_device`, either `"cpu"` or `"gpu"` when using OpenCL
 - `native_symmetry_plane`, one of `None`, `"yz"`, `"xz"`, or `"yz+xz"`
 - `restrict_neumann_space`, exactly omit rigid-wall zero Neumann columns from
@@ -264,7 +267,9 @@ config = SolveConfig(
 
 The value is `beta = rho*c / Z_s`. `beta = 0` is rigid, and `beta = 1` is an
 air-matched absorber. When non-empty, the solver substitutes the Robin
-condition directly into the linear system and solves once.
+condition directly into the linear system and solves once. This direct path is
+always double precision for numerical robustness, even when the requested
+`precision` is `"single"`; each solver-log entry records both values.
 
 ## Assembly Backends
 

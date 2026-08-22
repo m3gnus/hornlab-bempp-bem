@@ -44,6 +44,8 @@ def _solver_log_entry(fr: FrequencyResult) -> dict:
         "iterations": fr.iterations,
         "converged": fr.converged,
         "timing_s": fr.timing_s,
+        "requested_precision": fr.requested_precision,
+        "effective_precision": fr.effective_precision,
         "phase_timings": dict(fr.phase_timings),
     }
 
