@@ -97,6 +97,9 @@ Common fields:
 - `velocity_sources`, mapping physical tag to source weight
 - `velocity_mode`, either `VelocityMode.ACCELERATION` or `VelocityMode.VELOCITY`
 - `formulation`, one of `STANDARD`, `COMPLEX_K`, or `BURTON_MILLER`
+- `slp_dlp_quadrature`, `slp_dlp_singular_quadrature`, and
+  `hyp_adlp_quadrature`; singular orders 3 and 5 are rejected because the
+  pinned bempp-cl OpenCL assembler silently discards points at those orders
 - `solver`, one of `AUTO` (default), `LU`, or `GMRES`; `AUTO` selects LU at
   or below `lu_threshold` (6000 elements by default) and GMRES above it
 - `gmres_tol` (default `1e-6`) and optional `gmres_restart`

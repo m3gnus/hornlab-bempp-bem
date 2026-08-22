@@ -155,6 +155,42 @@ def test_solve_config_rejects_reversed_frequency_range():
         SolveConfig(freq_min_hz=2000.0, freq_max_hz=1000.0)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"slp_dlp_quadrature": 0},
+        {"slp_dlp_quadrature": 2.5},
+        {"slp_dlp_singular_quadrature": -2},
+        {"hyp_adlp_quadrature": True},
+    ],
+)
+def test_solve_config_rejects_invalid_quadrature_orders(kwargs):
+    field = next(iter(kwargs))
+    with pytest.raises(ValueError, match=rf"{field} must be a positive integer"):
+        SolveConfig(**kwargs)
+
+
+@pytest.mark.parametrize("order", [3, 5])
+def test_solve_config_rejects_singular_orders_that_drop_points(order):
+    with pytest.raises(
+        ValueError,
+        match=rf"singular_quadrature orders 3 and 5 are unsupported.*use.*4",
+    ):
+        SolveConfig(slp_dlp_singular_quadrature=order)
+
+
+def test_solve_config_normalizes_integral_quadrature_orders():
+    config = SolveConfig(
+        slp_dlp_quadrature=2.0,  # type: ignore[arg-type]
+        slp_dlp_singular_quadrature=4.0,  # type: ignore[arg-type]
+        hyp_adlp_quadrature=6.0,  # type: ignore[arg-type]
+    )
+
+    assert config.slp_dlp_quadrature == 2
+    assert config.slp_dlp_singular_quadrature == 4
+    assert config.hyp_adlp_quadrature == 6
+
+
 def test_solve_config_rejects_metal_backend():
     with pytest.raises(ValueError, match="assembly_backend"):
         SolveConfig(assembly_backend="metal")  # type: ignore[arg-type]

@@ -291,6 +291,21 @@ class SolveConfig:
             raise ValueError(
                 "formulation must be 'standard', 'complex_k', or 'burton_miller'"
             ) from None
+        for field_name in (
+            "slp_dlp_quadrature",
+            "slp_dlp_singular_quadrature",
+            "hyp_adlp_quadrature",
+        ):
+            value = getattr(self, field_name)
+            if not _is_integral_value(value) or value < 1:
+                raise ValueError(f"{field_name} must be a positive integer")
+            setattr(self, field_name, int(value))
+        if self.slp_dlp_singular_quadrature in {3, 5}:
+            raise ValueError(
+                "slp_dlp_singular_quadrature orders 3 and 5 are unsupported: "
+                "bempp-cl's OpenCL singular assembler silently discards "
+                "quadrature points at those orders; use an even order such as 4"
+            )
         try:
             self.solver = LinearSolver(self.solver)
         except (TypeError, ValueError):
