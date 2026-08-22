@@ -40,6 +40,12 @@ class FrequencyResult:
     phase_timings: dict[str, float] = field(default_factory=dict)
     requested_precision: str = "unknown"
     effective_precision: str = "unknown"
+    requested_solver: str = "unknown"
+    effective_solver: str = "unknown"
+    requested_backend: str = "unknown"
+    effective_backend: str = "unknown"
+    backend_fallback_used: bool = False
+    backend_fallback_reason: str | None = None
     field_pressure_on_surface: object | None = None
     field_neumann_data: object | None = None
 
@@ -704,7 +710,10 @@ def solve_single_frequency(
     effective_precision = "double" if active_impedance else config.precision
 
     start = time.perf_counter()
-    backend = resolve_assembly_backend(config).effective_backend
+    backend_resolution = resolve_assembly_backend(
+        config, required_precision=effective_precision,
+    )
+    backend = backend_resolution.effective_backend
     op_kwargs_low = _operator_kwargs(
         backend, effective_precision, config.opencl_device,
         config.slp_dlp_quadrature, config.slp_dlp_singular_quadrature,
@@ -718,6 +727,15 @@ def solve_single_frequency(
     phase_timings["backend_setup_s"] = time.perf_counter() - start
 
     n_tris = grid.number_of_elements
+    if active_impedance:
+        effective_solver = LinearSolver.LU
+    else:
+        solver_element_count = (
+            symmetry_context.reduced_element_count
+            if symmetry_context is not None
+            else n_tris
+        )
+        effective_solver = _choose_solver(config, solver_element_count)
 
     field_pressure = None
     field_neumann = None
@@ -828,6 +846,16 @@ def solve_single_frequency(
         phase_timings=phase_timings,
         requested_precision=config.precision,
         effective_precision=effective_precision,
+        requested_solver=config.solver.value,
+        effective_solver=effective_solver.value,
+        requested_backend=getattr(
+            backend_resolution, "requested_backend", config.assembly_backend,
+        ),
+        effective_backend=backend_resolution.effective_backend,
+        backend_fallback_used=getattr(
+            backend_resolution, "fallback_used", False,
+        ),
+        backend_fallback_reason=getattr(backend_resolution, "reason", None),
         field_pressure_on_surface=field_pressure,
         field_neumann_data=field_neumann,
     )

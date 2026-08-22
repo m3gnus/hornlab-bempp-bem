@@ -338,7 +338,15 @@ def run_coupled_infinite_baffle_sweep(
     )
     on_axis_idx = int(np.argmin(np.abs(angles_deg)))
 
-    backend = resolve_assembly_backend(config).effective_backend
+    backend_resolution = resolve_assembly_backend(config)
+    backend = backend_resolution.effective_backend
+    if backend_resolution.fallback_used:
+        logger.warning(
+            "Assembly backend %s could not be used; falling back to %s: %s",
+            backend_resolution.requested_backend,
+            backend_resolution.effective_backend,
+            backend_resolution.reason or "no reason reported",
+        )
     op_kwargs = _operator_kwargs(
         backend,
         config.precision,
@@ -535,12 +543,24 @@ def run_coupled_infinite_baffle_sweep(
             "aperture_pressure_continuity_rel": continuity_rel,
             "complex_k": config.formulation is BIEFormulation.COMPLEX_K,
             "assembly_backend": backend,
+            "requested_backend": backend_resolution.requested_backend,
+            "effective_backend": backend_resolution.effective_backend,
+            "fallback_used": backend_resolution.fallback_used,
+            "reason": backend_resolution.reason,
         }
         log_entry = {
             "frequency_hz": float(frequency),
             "iterations": None,
             "converged": True,
             "timing_s": elapsed,
+            "requested_precision": config.precision,
+            "effective_precision": config.precision,
+            "requested_solver": config.solver.value,
+            "effective_solver": "lu",
+            "requested_backend": backend_resolution.requested_backend,
+            "effective_backend": backend_resolution.effective_backend,
+            "fallback_used": backend_resolution.fallback_used,
+            "reason": backend_resolution.reason,
             "phase_timings": phase,
             "impedance": impedance,
             "native_diagnostics": diagnostics,

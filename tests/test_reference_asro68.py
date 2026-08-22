@@ -1,7 +1,7 @@
 """Maintained ASRO68 fixture and library gates for the canonical solver.
 
 These checks supersede migration-era comparisons against Waveguide Generator's
-``solve_optimized``, which was deleted in May 2026. They anchor both observation
+``solve_optimized``, which was deleted in June 2026. They anchor both observation
 origins directly to pinned results and compare the stored canonical result to
 the independent ABEC reference without importing a deleted implementation.
 """
@@ -47,7 +47,7 @@ def test_default_solve_config_uses_canonical_profile():
     config = SolveConfig()
 
     assert config.formulation is BIEFormulation.STANDARD
-    assert config.solver is LinearSolver.AUTO
+    assert config.solver is LinearSolver.GMRES
     assert config.assembly_backend == "opencl"
     assert config.opencl_device == "cpu"
     assert config.precision == "single"

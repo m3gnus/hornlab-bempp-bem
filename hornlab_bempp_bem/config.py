@@ -170,7 +170,7 @@ class SolveConfig:
     hyp_adlp_quadrature: int = 4
 
     # Linear solver
-    solver: LinearSolver = LinearSolver.AUTO
+    solver: LinearSolver = LinearSolver.GMRES
     lu_threshold: int = 6000
     gmres_tol: float = 1e-6
     gmres_max_iter: int = 5000
@@ -300,12 +300,6 @@ class SolveConfig:
             if not _is_integral_value(value) or value < 1:
                 raise ValueError(f"{field_name} must be a positive integer")
             setattr(self, field_name, int(value))
-        if self.slp_dlp_singular_quadrature in {3, 5}:
-            raise ValueError(
-                "slp_dlp_singular_quadrature orders 3 and 5 are unsupported: "
-                "bempp-cl's OpenCL singular assembler silently discards "
-                "quadrature points at those orders; use an even order such as 4"
-            )
         try:
             self.solver = LinearSolver(self.solver)
         except (TypeError, ValueError):

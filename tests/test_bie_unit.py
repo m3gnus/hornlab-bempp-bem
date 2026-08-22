@@ -22,10 +22,16 @@ from hornlab_bempp_bem.config import (
 _FRAME_AXIS = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
 
-def test_default_solver_uses_lu_threshold():
+def test_default_solver_remains_gmres_below_lu_threshold():
     config = SolveConfig(lu_threshold=100)
 
-    assert config.solver is LinearSolver.AUTO
+    assert config.solver is LinearSolver.GMRES
+    assert _choose_solver(config, 1) is LinearSolver.GMRES
+
+
+def test_auto_solver_opt_in_uses_lu_threshold():
+    config = SolveConfig(solver=LinearSolver.AUTO, lu_threshold=100)
+
     assert _choose_solver(config, 100) is LinearSolver.LU
     assert _choose_solver(config, 101) is LinearSolver.GMRES
 

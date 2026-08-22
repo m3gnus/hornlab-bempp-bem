@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from hornlab_bempp_bem.backends import (
+    AssemblyBackendUnavailable,
     resolve_assembly_backend,
     resolve_fastest_backend,
 )
@@ -171,12 +172,51 @@ def test_solve_config_rejects_invalid_quadrature_orders(kwargs):
 
 
 @pytest.mark.parametrize("order", [3, 5])
-def test_solve_config_rejects_singular_orders_that_drop_points(order):
+def test_numba_accepts_singular_orders_that_opencl_mishandles(order):
+    config = SolveConfig(
+        assembly_backend="numba",
+        slp_dlp_singular_quadrature=order,
+    )
+
+    resolution = resolve_assembly_backend(config)
+
+    assert resolution.effective_backend == "numba"
+
+
+@pytest.mark.parametrize("order", [3, 5])
+def test_opencl_rejects_singular_orders_that_drop_points(order):
+    config = SolveConfig(
+        assembly_backend="opencl",
+        slp_dlp_singular_quadrature=order,
+    )
+
     with pytest.raises(
         ValueError,
         match=rf"singular_quadrature orders 3 and 5 are unsupported.*use.*4",
     ):
-        SolveConfig(slp_dlp_singular_quadrature=order)
+        resolve_assembly_backend(config)
+
+
+@pytest.mark.parametrize("order", [3, 5])
+def test_auto_accepts_odd_singular_order_after_numba_fallback(monkeypatch, order):
+    from hornlab_bempp_bem.device import OpenCLError
+
+    def fail_probe(_device):
+        raise OpenCLError("no usable OpenCL device")
+
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.configure_opencl",
+        fail_probe,
+    )
+    config = SolveConfig(
+        assembly_backend="auto",
+        slp_dlp_singular_quadrature=order,
+    )
+
+    resolution = resolve_assembly_backend(config)
+
+    assert resolution.effective_backend == "numba"
+    assert resolution.fallback_used is True
 
 
 def test_solve_config_normalizes_integral_quadrature_orders():
@@ -315,6 +355,81 @@ def test_auto_backend_falls_back_to_numba_when_opencl_probe_fails(monkeypatch):
     assert resolution.effective_backend == "numba"
     assert resolution.fallback_used is True
     assert resolution.reason == "no usable OpenCL device"
+
+
+def test_auto_double_precision_falls_back_from_fp32_only_opencl(monkeypatch):
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.configure_opencl",
+        lambda _device: "Mock FP32 GPU",
+    )
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.opencl_devices_without_fp64",
+        lambda _device: ("Mock FP32 GPU",),
+    )
+
+    resolution = resolve_assembly_backend(
+        SolveConfig(assembly_backend="auto", precision="single"),
+        required_precision="double",
+    )
+
+    assert resolution.effective_backend == "numba"
+    assert resolution.fallback_used is True
+    assert "Mock FP32 GPU" in (resolution.reason or "")
+    assert "fp64" in (resolution.reason or "")
+
+
+def test_explicit_opencl_refuses_double_on_fp32_only_device(monkeypatch):
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.configure_opencl",
+        lambda _device: "Mock FP32 Accelerator",
+    )
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.opencl_devices_without_fp64",
+        lambda _device: ("Mock FP32 Accelerator",),
+    )
+
+    with pytest.raises(
+        AssemblyBackendUnavailable,
+        match="Mock FP32 Accelerator.*fp64.*Numba",
+    ):
+        resolve_assembly_backend(
+            SolveConfig(assembly_backend="opencl", precision="single"),
+            required_precision="double",
+        )
+
+
+def test_auto_double_precision_keeps_fp64_opencl(monkeypatch):
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.configure_opencl",
+        lambda _device: "Mock FP64 GPU",
+    )
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.opencl_devices_without_fp64",
+        lambda _device: (),
+    )
+
+    resolution = resolve_assembly_backend(
+        SolveConfig(assembly_backend="auto", precision="single"),
+        required_precision="double",
+    )
+
+    assert resolution.effective_backend == "opencl"
+    assert resolution.fallback_used is False
+
+
+@pytest.mark.parametrize(
+    ("device", "expected"),
+    [
+        (SimpleNamespace(double_fp_config=1, extensions=""), True),
+        (SimpleNamespace(double_fp_config=0, extensions="cl_khr_fp64"), True),
+        (SimpleNamespace(double_fp_config=0, extensions="cl_amd_fp64"), True),
+        (SimpleNamespace(double_fp_config=0, extensions=""), False),
+    ],
+)
+def test_opencl_fp64_capability_uses_device_features(device, expected):
+    from hornlab_bempp_bem.device import _opencl_device_supports_fp64
+
+    assert _opencl_device_supports_fp64(device) is expected
 
 
 def test_explicit_solve_backend_does_not_probe_opencl(monkeypatch):

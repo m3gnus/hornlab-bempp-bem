@@ -127,6 +127,42 @@ def configure_opencl(device_type: str = "cpu") -> str:
     return _active_device_name
 
 
+def _opencl_device_supports_fp64(device: object) -> bool:
+    """Return whether an OpenCL device advertises double-precision support."""
+    try:
+        if int(getattr(device, "double_fp_config", 0)) != 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    extensions = set(str(getattr(device, "extensions", "")).split())
+    return bool({"cl_khr_fp64", "cl_amd_fp64"} & extensions)
+
+
+def opencl_devices_without_fp64(device_type: str = "cpu") -> tuple[str, ...]:
+    """Name configured devices that Bempp needs but that lack fp64 support.
+
+    Bempp's GPU boundary path still uses its CPU OpenCL context for dense
+    singular assembly, so both devices must support fp64 in GPU mode.
+    """
+    normalized = str(device_type or "cpu").strip().lower()
+    configure_opencl(normalized)
+
+    import bempp_cl.core.opencl_kernels as opencl_kernels
+
+    if normalized == "cpu":
+        devices = (opencl_kernels.default_cpu_device(),)
+    else:
+        devices = (
+            opencl_kernels.default_gpu_device(),
+            opencl_kernels.default_cpu_device(),
+        )
+    return tuple(
+        str(getattr(device, "name", None) or "unnamed OpenCL device")
+        for device in devices
+        if not _opencl_device_supports_fp64(device)
+    )
+
+
 # Compatibility with the previous ``lru_cache``-decorated implementation, which
 # callers and tests reset through this name.
 configure_opencl.cache_clear = reset_opencl_device

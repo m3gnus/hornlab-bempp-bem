@@ -4,6 +4,7 @@ These tests mock out bempp-cl internals to test the sweep logic in isolation.
 """
 from __future__ import annotations
 
+import logging
 import queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -47,6 +48,12 @@ def _fake_frequency_result(
     freq_hz: float,
     *,
     effective_precision: str = "single",
+    requested_solver: str = "gmres",
+    effective_solver: str = "gmres",
+    requested_backend: str = "opencl",
+    effective_backend: str = "opencl",
+    fallback_used: bool = False,
+    reason: str | None = None,
 ):
     fr = MagicMock()
     fr.frequency_hz = freq_hz
@@ -56,6 +63,12 @@ def _fake_frequency_result(
     fr.phase_timings = {"total_s": 0.5, "linear_solve_s": 0.1}
     fr.requested_precision = "single"
     fr.effective_precision = effective_precision
+    fr.requested_solver = requested_solver
+    fr.effective_solver = effective_solver
+    fr.requested_backend = requested_backend
+    fr.effective_backend = effective_backend
+    fr.backend_fallback_used = fallback_used
+    fr.backend_fallback_reason = reason
     fr.impedance = 400.0 + 50j
     fr.pressure_on_surface = MagicMock()
     fr.pressure_on_surface.space = MagicMock()
@@ -167,14 +180,21 @@ class TestOnAxisIndex:
 
 class TestBatchedObservationEvaluation:
 
-    def test_directivity_uses_the_solve_effective_precision(self):
+    def test_directivity_uses_the_solve_effective_precision_and_backend(self):
         from hornlab_bempp_bem.sweep import _evaluate_directivity
 
-        result = _fake_frequency_result(1000.0, effective_precision="double")
+        result = _fake_frequency_result(
+            1000.0,
+            effective_precision="double",
+            requested_backend="auto",
+            effective_backend="numba",
+            fallback_used=True,
+            reason="Mock FP32 GPU lacks fp64",
+        )
         obs_points = np.zeros((1, 5, 3), dtype=np.float64)
         angles = np.linspace(0.0, 180.0, 5)
         config = SolveConfig(
-            assembly_backend="numba",
+            assembly_backend="auto",
             precision="single",
             observation=ObservationConfig(planes=["horizontal"], angle_count=5),
         )
@@ -182,8 +202,8 @@ class TestBatchedObservationEvaluation:
         with (
             patch(
                 f"{_SWEEP}.resolve_assembly_backend",
-                return_value=SimpleNamespace(effective_backend="numba"),
-            ),
+                return_value=SimpleNamespace(effective_backend="opencl"),
+            ) as resolve_backend,
             patch(f"{_SWEEP}._operator_kwargs", return_value={}) as operator_kwargs,
             patch(
                 f"{_SWEEP}._evaluate_observation_planes",
@@ -197,7 +217,9 @@ class TestBatchedObservationEvaluation:
             _evaluate_directivity([result], obs_points, angles, config)
 
         assert operator_kwargs.call_count == 1
+        assert operator_kwargs.call_args.args[0] == "numba"
         assert operator_kwargs.call_args.args[1] == "double"
+        resolve_backend.assert_not_called()
 
     def test_all_planes_share_one_far_field_evaluation(self):
         from hornlab_bempp_bem.sweep import _evaluate_observation_planes
@@ -273,10 +295,14 @@ class TestEarlyStopping:
             return_value=_fake_frequency_result(
                 1000.0,
                 effective_precision="double",
+                requested_backend="auto",
+                effective_backend="numba",
+                fallback_used=True,
+                reason="Mock FP32 GPU lacks fp64",
             ),
         )
         config = SolveConfig(
-            assembly_backend="numba",
+            assembly_backend="auto",
             precision="single",
             observation=ObservationConfig(planes=["horizontal"], angle_count=5),
             on_frequency_result=lambda *_args: True,
@@ -289,6 +315,10 @@ class TestEarlyStopping:
             patches["ff"],
             patches["op_kw"] as operator_kwargs,
             patches["dir"],
+            patch(
+                f"{_SWEEP}.resolve_assembly_backend",
+                return_value=SimpleNamespace(effective_backend="opencl"),
+            ) as resolve_backend,
         ):
             run_sweep_serial(
                 _make_mesh(),
@@ -298,7 +328,9 @@ class TestEarlyStopping:
             )
 
         assert operator_kwargs.call_count == 1
+        assert operator_kwargs.call_args.args[0] == "numba"
         assert operator_kwargs.call_args.args[1] == "double"
+        resolve_backend.assert_not_called()
 
     def test_early_stop_after_two_frequencies(self):
         from hornlab_bempp_bem.sweep import run_sweep_serial
@@ -330,6 +362,52 @@ class TestEarlyStopping:
         assert all(log["converged"] is True for log in callback_logs)
         assert all(log["converged"] is True for log in result.solver_log)
         np.testing.assert_allclose(result.frequencies_hz, [500.0, 1000.0])
+
+    def test_auto_backend_fallback_is_logged_once_and_stored(self, caplog):
+        from hornlab_bempp_bem.sweep import run_sweep_serial
+
+        patches = _standard_sweep_patches()
+        patches["solve"] = patch(
+            f"{_SWEEP}.solve_single_frequency",
+            side_effect=lambda *args, **_kwargs: _fake_frequency_result(
+                args[2],
+                requested_backend="auto",
+                effective_backend="numba",
+                fallback_used=True,
+                reason="no usable OpenCL device",
+            ),
+        )
+        config = SolveConfig(
+            assembly_backend="auto",
+            observation=ObservationConfig(
+                planes=["horizontal"], angle_count=5,
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING), \
+             patches["spaces"], patches["solve"], patches["pavg"], \
+             patches["ff"], patches["op_kw"], patches["dir"]:
+            result = run_sweep_serial(
+                _make_mesh(), np.array([500.0, 1000.0]),
+                _make_frame(), config,
+            )
+
+        assert [entry["requested_backend"] for entry in result.solver_log] == [
+            "auto", "auto",
+        ]
+        assert [entry["effective_backend"] for entry in result.solver_log] == [
+            "numba", "numba",
+        ]
+        assert all(entry["fallback_used"] is True for entry in result.solver_log)
+        assert all(
+            entry["reason"] == "no usable OpenCL device"
+            for entry in result.solver_log
+        )
+        fallback_warnings = [
+            record for record in caplog.records
+            if "falling back" in record.getMessage().lower()
+        ]
+        assert len(fallback_warnings) == 1
 
     def test_no_early_stop_all_frequencies_solved(self):
         from hornlab_bempp_bem.sweep import run_sweep_serial
