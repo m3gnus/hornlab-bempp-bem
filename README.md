@@ -339,6 +339,6 @@ NUMBA_CACHE_DIR="$PWD/.numba_cache" python -m pytest -q
 Slow validation tests that depend on external fixtures are expected to skip
 when those fixtures are unavailable. To enable them without relying on a
 particular workspace layout, set `HORNLAB_ASRO68_MESH` to the reference mesh,
-`HORNLAB_VALIDATION_ARTIFACTS` to the validation-artifact directory, and
-`HORNLAB_WAVEGUIDE_GENERATOR_SERVER` to the legacy server directory when
-running legacy parity coverage.
+and `HORNLAB_VALIDATION_ARTIFACTS` to the validation-artifact directory. The
+ASRO68 gates compare against pinned library results and the independent ABEC
+fixture; they do not depend on Waveguide Generator's deleted legacy solver.
