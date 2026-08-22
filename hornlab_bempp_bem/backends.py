@@ -23,18 +23,12 @@ class AssemblyBackendResolution:
 
 
 def resolve_assembly_backend(config: SolveConfig) -> AssemblyBackendResolution:
-    """Resolve ``SolveConfig.assembly_backend`` to a current Bempp backend."""
+    """Resolve a solve backend, probing before selecting OpenCL for ``auto``."""
 
-    requested = config.assembly_backend
-    if requested == "auto":
-        return AssemblyBackendResolution(
-            requested_backend=requested,
-            effective_backend="opencl",
-            fallback_used=False,
-            reason="auto selects the production OpenCL Bempp backend",
-        )
-
-    return _resolve_explicit(requested)
+    return resolve_fastest_backend(
+        config.assembly_backend,
+        opencl_device=config.opencl_device,
+    )
 
 
 def resolve_fastest_backend(
@@ -44,16 +38,11 @@ def resolve_fastest_backend(
 ) -> AssemblyBackendResolution:
     """Resolve ``requested`` to the fastest backend this machine can run.
 
-    ``resolve_assembly_backend`` maps ``auto`` to OpenCL without probing, which
-    is what a solve wants: a machine that cannot assemble on OpenCL should say
-    so rather than quietly take several times as long. Post-solve field
-    evaluation is the other case. It re-evaluates interactively from traces
-    already on disk, so it has to keep working wherever the solve ran, and
-    Numba is the slower option on both axes that matter. On one CPU OpenCL
-    device it cost roughly three times the one-off per-process kernel compile
-    and twice the steady-state evaluation, for results that agreed to machine
-    precision; the ratios are machine-specific but the ordering has not been
-    observed to invert. So ``auto`` probes, prefers OpenCL, and falls back
+    Solve-time and post-solve field evaluation share this policy. On one CPU
+    OpenCL device, Numba cost roughly three times the one-off per-process kernel
+    compile and twice the steady-state evaluation, for results that agreed to
+    machine precision; the ratios are machine-specific but the ordering has not
+    been observed to invert. So ``auto`` probes, prefers OpenCL, and falls back
     only when there is no device to prefer.
     """
 
@@ -73,7 +62,7 @@ def resolve_fastest_backend(
             requested_backend=requested,
             effective_backend="opencl",
             fallback_used=False,
-            reason="auto selects the production OpenCL Bempp backend",
+            reason="auto selected an available OpenCL Bempp backend",
         )
 
     return _resolve_explicit(requested)

@@ -273,7 +273,9 @@ Numba cache location; set `NUMBA_CACHE_DIR` when running in restricted
 environments. The base package is sufficient for this path and does not install
 PyOpenCL.
 
-`assembly_backend="auto"` currently selects the production OpenCL Bempp backend.
+`assembly_backend="auto"` probes the requested OpenCL device, uses it when it
+can be initialized, and otherwise falls back to the portable Numba backend.
+Naming `"opencl"` explicitly keeps fail-fast behavior when OpenCL is required.
 
 ## Outputs
 

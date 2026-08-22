@@ -236,8 +236,49 @@ def test_gmres_defaults_and_restart_validation():
         SolveConfig(gmres_tol=0.0)
 
 
-def test_auto_backend_resolves_to_opencl():
+def test_auto_backend_probes_and_resolves_to_opencl(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.configure_opencl",
+        lambda device: calls.append(device),
+    )
+
     resolution = resolve_assembly_backend(SolveConfig(assembly_backend="auto"))
+
+    assert resolution.effective_backend == "opencl"
+    assert resolution.fallback_used is False
+    assert calls == ["cpu"]
+
+
+def test_auto_backend_falls_back_to_numba_when_opencl_probe_fails(monkeypatch):
+    from hornlab_bempp_bem.device import OpenCLError
+
+    def fail_probe(_device):
+        raise OpenCLError("no usable OpenCL device")
+
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.configure_opencl",
+        fail_probe,
+    )
+
+    resolution = resolve_assembly_backend(SolveConfig(assembly_backend="auto"))
+
+    assert resolution.effective_backend == "numba"
+    assert resolution.fallback_used is True
+    assert resolution.reason == "no usable OpenCL device"
+
+
+def test_explicit_solve_backend_does_not_probe_opencl(monkeypatch):
+    def fail_if_called(_device):
+        raise AssertionError("explicit backend resolution must not probe")
+
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.configure_opencl",
+        fail_if_called,
+    )
+
+    resolution = resolve_assembly_backend(SolveConfig(assembly_backend="opencl"))
+
     assert resolution.effective_backend == "opencl"
     assert resolution.fallback_used is False
 
