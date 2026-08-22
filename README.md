@@ -97,7 +97,8 @@ Common fields:
 - `velocity_sources`, mapping physical tag to source weight
 - `velocity_mode`, either `VelocityMode.ACCELERATION` or `VelocityMode.VELOCITY`
 - `formulation`, one of `STANDARD`, `COMPLEX_K`, or `BURTON_MILLER`
-- `solver`, one of `AUTO`, `LU`, or `GMRES`
+- `solver`, one of `AUTO` (default), `LU`, or `GMRES`; `AUTO` selects LU at
+  or below `lu_threshold` (6000 elements by default) and GMRES above it
 - `gmres_tol` (default `1e-6`) and optional `gmres_restart`
 - `observation`, an `ObservationConfig`
 - `mesh_scale`

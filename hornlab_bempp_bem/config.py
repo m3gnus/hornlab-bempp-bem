@@ -170,7 +170,7 @@ class SolveConfig:
     hyp_adlp_quadrature: int = 4
 
     # Linear solver
-    solver: LinearSolver = LinearSolver.GMRES
+    solver: LinearSolver = LinearSolver.AUTO
     lu_threshold: int = 6000
     gmres_tol: float = 1e-6
     gmres_max_iter: int = 5000
@@ -295,6 +295,9 @@ class SolveConfig:
             self.solver = LinearSolver(self.solver)
         except (TypeError, ValueError):
             raise ValueError("solver must be 'auto', 'lu', or 'gmres'") from None
+        if not _is_integral_value(self.lu_threshold) or self.lu_threshold < 1:
+            raise ValueError("lu_threshold must be a positive integer")
+        self.lu_threshold = int(self.lu_threshold)
         try:
             valid_gmres_tol = isfinite(self.gmres_tol) and self.gmres_tol > 0.0
         except (TypeError, ValueError):

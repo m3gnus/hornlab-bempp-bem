@@ -11,9 +11,34 @@ import numpy as np
 
 from types import SimpleNamespace
 
-from hornlab_bempp_bem.config import SolveConfig, SourceMotion, VelocityMode
+from hornlab_bempp_bem.bie import _choose_solver
+from hornlab_bempp_bem.config import (
+    LinearSolver,
+    SolveConfig,
+    SourceMotion,
+    VelocityMode,
+)
 
 _FRAME_AXIS = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+
+def test_default_solver_uses_lu_threshold():
+    config = SolveConfig(lu_threshold=100)
+
+    assert config.solver is LinearSolver.AUTO
+    assert _choose_solver(config, 100) is LinearSolver.LU
+    assert _choose_solver(config, 101) is LinearSolver.GMRES
+
+
+def test_explicit_solver_bypasses_lu_threshold():
+    assert (
+        _choose_solver(SolveConfig(solver=LinearSolver.GMRES), 1)
+        is LinearSolver.GMRES
+    )
+    assert (
+        _choose_solver(SolveConfig(solver=LinearSolver.LU), 100_000)
+        is LinearSolver.LU
+    )
 
 
 def test_open_mesh_p1_space_excludes_free_boundary_dofs():

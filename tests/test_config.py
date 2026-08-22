@@ -236,6 +236,19 @@ def test_gmres_defaults_and_restart_validation():
         SolveConfig(gmres_tol=0.0)
 
 
+@pytest.mark.parametrize("lu_threshold", [0, -1, 1.5, True, "6000"])
+def test_solve_config_rejects_invalid_lu_threshold(lu_threshold):
+    with pytest.raises(ValueError, match="lu_threshold must be a positive integer"):
+        SolveConfig(lu_threshold=lu_threshold)  # type: ignore[arg-type]
+
+
+def test_solve_config_normalizes_integral_lu_threshold():
+    config = SolveConfig(lu_threshold=100.0)  # type: ignore[arg-type]
+
+    assert config.lu_threshold == 100
+    assert isinstance(config.lu_threshold, int)
+
+
 def test_auto_backend_probes_and_resolves_to_opencl(monkeypatch):
     calls = []
     monkeypatch.setattr(

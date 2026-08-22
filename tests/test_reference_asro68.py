@@ -40,7 +40,7 @@ def test_default_solve_config_uses_canonical_profile():
     config = SolveConfig()
 
     assert config.formulation is BIEFormulation.STANDARD
-    assert config.solver is LinearSolver.GMRES
+    assert config.solver is LinearSolver.AUTO
     assert config.assembly_backend == "opencl"
     assert config.opencl_device == "cpu"
     assert config.precision == "single"
