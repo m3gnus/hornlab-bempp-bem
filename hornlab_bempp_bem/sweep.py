@@ -50,6 +50,32 @@ def _solver_log_entry(fr: FrequencyResult) -> dict:
     }
 
 
+def _field_operator_kwargs(
+    fr: FrequencyResult,
+    config: SolveConfig,
+    backend: str,
+    cache: dict[str, dict],
+) -> dict:
+    """Return potential-operator kwargs at the solve's effective precision.
+
+    Older/manually constructed ``FrequencyResult`` objects may not carry the
+    precision diagnostic, so retain requested-precision behavior for those
+    compatibility cases. Normal solves always publish ``single`` or ``double``.
+    """
+
+    precision = getattr(fr, "effective_precision", None)
+    if precision not in {"single", "double"}:
+        precision = config.precision
+    if precision not in cache:
+        cache[precision] = _operator_kwargs(
+            backend,
+            precision,
+            config.opencl_device,
+            vectorization_mode=getattr(config, "vectorization_mode", "auto"),
+        )
+    return cache[precision]
+
+
 def _retained_surface_traces(
     freq_results: list[FrequencyResult],
     enabled: bool,
@@ -169,13 +195,13 @@ def _evaluate_directivity(
     on_axis_idx = int(np.argmin(np.abs(angles_deg)))
 
     backend = resolve_assembly_backend(config).effective_backend
-    op_kwargs = _operator_kwargs(
-        backend, config.precision, config.opencl_device,
-        vectorization_mode=getattr(config, "vectorization_mode", "auto"),
-    )
+    op_kwargs_by_precision: dict[str, dict] = {}
 
     for fi, fr in enumerate(freq_results):
         k_real = 2.0 * np.pi * fr.frequency_hz / SPEED_OF_SOUND
+        op_kwargs = _field_operator_kwargs(
+            fr, config, backend, op_kwargs_by_precision,
+        )
 
         field_pressure = (
             fr.field_pressure_on_surface
@@ -288,10 +314,7 @@ def run_sweep_serial(
     callback_sphere_rows: list[NDArray[np.complex128]] = []
     if has_callback:
         _backend = resolve_assembly_backend(config).effective_backend
-        _ff_op_kwargs = _operator_kwargs(
-            _backend, config.precision, config.opencl_device,
-            vectorization_mode=getattr(config, "vectorization_mode", "auto"),
-        )
+        _ff_op_kwargs_by_precision: dict[str, dict] = {}
         on_axis_idx = int(np.argmin(np.abs(angles_deg)))
 
     for i, freq in enumerate(frequencies):
@@ -321,6 +344,9 @@ def run_sweep_serial(
         # When the callback is set, evaluate per-frequency directivity
         # so the caller can act on partial results as they stream in.
         if has_callback:
+            _ff_op_kwargs = _field_operator_kwargs(
+                fr, config, _backend, _ff_op_kwargs_by_precision,
+            )
             k_real = 2.0 * np.pi * fr.frequency_hz / SPEED_OF_SOUND
             field_pressure = (
                 fr.field_pressure_on_surface
@@ -774,10 +800,7 @@ def _worker_solve_chunk_inner(
     on_axis_idx = int(np.argmin(np.abs(angles_deg)))
 
     backend = resolve_assembly_backend(config).effective_backend
-    op_kwargs = _operator_kwargs(
-        backend, config.precision, config.opencl_device,
-        vectorization_mode=getattr(config, "vectorization_mode", "auto"),
-    )
+    op_kwargs_by_precision: dict[str, dict] = {}
 
     for i, freq in enumerate(frequencies):
         fr = solve_single_frequency(
@@ -788,6 +811,9 @@ def _worker_solve_chunk_inner(
             axial_element_scale=axial_element_scale,
             closed_mesh_validated=True,
             symmetry_context=symmetry_context,
+        )
+        op_kwargs = _field_operator_kwargs(
+            fr, config, backend, op_kwargs_by_precision,
         )
         impedance[i] = fr.impedance
         pavg = compute_surface_pressure_avg(
