@@ -182,7 +182,9 @@ def evaluate_exterior_from_traces(
     # Resolve after the geometry work above, so a machine with no OpenCL device
     # pays the probe only on a call that was going to assemble anyway.
     resolution = resolve_fastest_backend(
-        assembly_backend, opencl_device=opencl_device,
+        assembly_backend,
+        opencl_device=opencl_device,
+        required_precision=precision,
     )
     op_kwargs = _operator_kwargs(
         resolution.effective_backend,

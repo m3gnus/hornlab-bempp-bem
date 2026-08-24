@@ -291,10 +291,22 @@ class SolveConfig:
             raise ValueError(
                 "formulation must be 'standard', 'complex_k', or 'burton_miller'"
             ) from None
+        for field_name in (
+            "slp_dlp_quadrature",
+            "slp_dlp_singular_quadrature",
+            "hyp_adlp_quadrature",
+        ):
+            value = getattr(self, field_name)
+            if not _is_integral_value(value) or value < 1:
+                raise ValueError(f"{field_name} must be a positive integer")
+            setattr(self, field_name, int(value))
         try:
             self.solver = LinearSolver(self.solver)
         except (TypeError, ValueError):
             raise ValueError("solver must be 'auto', 'lu', or 'gmres'") from None
+        if not _is_integral_value(self.lu_threshold) or self.lu_threshold < 1:
+            raise ValueError("lu_threshold must be a positive integer")
+        self.lu_threshold = int(self.lu_threshold)
         try:
             valid_gmres_tol = isfinite(self.gmres_tol) and self.gmres_tol > 0.0
         except (TypeError, ValueError):

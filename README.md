@@ -97,13 +97,27 @@ Common fields:
 - `velocity_sources`, mapping physical tag to source weight
 - `velocity_mode`, either `VelocityMode.ACCELERATION` or `VelocityMode.VELOCITY`
 - `formulation`, one of `STANDARD`, `COMPLEX_K`, or `BURTON_MILLER`
-- `solver`, one of `AUTO`, `LU`, or `GMRES`
+- `slp_dlp_quadrature`, `slp_dlp_singular_quadrature`, and
+  `hyp_adlp_quadrature`; singular orders 3 and 5 are accepted on Numba but
+  rejected after backend resolution when the pinned bempp-cl OpenCL assembler
+  would silently discard points at those orders
+- `solver`, one of `GMRES` (default), `LU`, or `AUTO`; `AUTO` is an explicit
+  opt-in that selects LU at or below `lu_threshold` (6000 elements by default)
+  and GMRES above it. Making `AUTO` the default would require a measurement
+  campaign across representative below- and above-threshold meshes and
+  difficult frequencies, covering complex pressure, SPL, impedance,
+  convergence, wall time, and peak memory; that qualification has not been run
 - `gmres_tol` (default `1e-6`) and optional `gmres_restart`
 - `observation`, an `ObservationConfig`
 - `mesh_scale`
 - `air_density`
 - `require_closed_mesh`, reject open or non-manifold surfaces before solving
 - `assembly_backend`, one of `"opencl"`, `"numba"`, or `"auto"`
+- `precision`, `"single"` (default) or `"double"`; Robin impedance solves
+  explicitly promote operator assembly, the direct system, and retained traces
+  to double precision, and expose requested/effective precision in `solver_log`.
+  AUTO falls back to Numba if the selected OpenCL device lacks fp64; explicitly
+  requesting OpenCL instead raises an early error naming the limitation
 - `opencl_device`, either `"cpu"` or `"gpu"` when using OpenCL
 - `native_symmetry_plane`, one of `None`, `"yz"`, `"xz"`, or `"yz+xz"`
 - `restrict_neumann_space`, exactly omit rigid-wall zero Neumann columns from
@@ -260,7 +274,13 @@ config = SolveConfig(
 
 The value is `beta = rho*c / Z_s`. `beta = 0` is rigid, and `beta = 1` is an
 air-matched absorber. When non-empty, the solver substitutes the Robin
-condition directly into the linear system and solves once.
+condition directly into the linear system and solves once. This direct path is
+always double precision for numerical robustness, even when the requested
+`precision` is `"single"`; each solver-log entry records both values. An AUTO
+backend request falls back to Numba when OpenCL's selected devices lack fp64.
+An explicit OpenCL request refuses the solve early and names the incapable
+device, because silently undoing the required promotion would restore the
+mixed-precision correctness defect.
 
 ## Assembly Backends
 
@@ -273,7 +293,12 @@ Numba cache location; set `NUMBA_CACHE_DIR` when running in restricted
 environments. The base package is sufficient for this path and does not install
 PyOpenCL.
 
-`assembly_backend="auto"` currently selects the production OpenCL Bempp backend.
+`assembly_backend="auto"` probes the requested OpenCL device, uses it when it
+can be initialized, and otherwise falls back to the portable Numba backend.
+Naming `"opencl"` explicitly keeps fail-fast behavior when OpenCL is required.
+Automatic fallback emits one warning per sweep, and every solver-log entry
+records the requested and effective backend, whether fallback occurred, and
+the reason.
 
 ## Outputs
 
@@ -297,7 +322,8 @@ Key result fields:
   the Robin contribution, when `return_surface_traces=True`
 - `sphere_pressure_complex`: optional `(F, n_theta*n_phi)` spherical pressure
 - `sphere_theta_deg`, `sphere_phi_deg`: optional theta-major sphere coordinates
-- `timings` and `solver_log`: backend timing and diagnostic metadata
+- `timings` and `solver_log`: timing plus requested/effective solver, precision,
+  and assembly-backend metadata for each frequency
 
 `spl_db` and `directivity_db` are not absolute SPL. Use `pressure_complex` for
 absolute complex pressure and derive SPL explicitly when needed.
@@ -328,6 +354,6 @@ NUMBA_CACHE_DIR="$PWD/.numba_cache" python -m pytest -q
 Slow validation tests that depend on external fixtures are expected to skip
 when those fixtures are unavailable. To enable them without relying on a
 particular workspace layout, set `HORNLAB_ASRO68_MESH` to the reference mesh,
-`HORNLAB_VALIDATION_ARTIFACTS` to the validation-artifact directory, and
-`HORNLAB_WAVEGUIDE_GENERATOR_SERVER` to the legacy server directory when
-running legacy parity coverage.
+and `HORNLAB_VALIDATION_ARTIFACTS` to the validation-artifact directory. The
+ASRO68 gates compare against pinned library results and the independent ABEC
+fixture; they do not depend on Waveguide Generator's deleted legacy solver.

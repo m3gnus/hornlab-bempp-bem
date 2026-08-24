@@ -38,6 +38,14 @@ class FrequencyResult:
     converged: bool
     timing_s: float
     phase_timings: dict[str, float] = field(default_factory=dict)
+    requested_precision: str = "unknown"
+    effective_precision: str = "unknown"
+    requested_solver: str = "unknown"
+    effective_solver: str = "unknown"
+    requested_backend: str = "unknown"
+    effective_backend: str = "unknown"
+    backend_fallback_used: bool = False
+    backend_fallback_reason: str | None = None
     field_pressure_on_surface: object | None = None
     field_neumann_data: object | None = None
 
@@ -391,8 +399,9 @@ def _assemble_and_solve_impedance(
     # n_total = g_drv + i·k·β·p_dp0
     p_dp0 = M_proj @ p_coeffs                          # (n_dp0,)
     g_robin = (1j * k) * beta_vec * p_dp0              # (n_dp0,)
-    # The Robin direct solve runs in complex128; only downcast the true
-    # Neumann data when the configured precision asks for it.
+    # Robin config is promoted to double before reaching this function, so the
+    # assembled operators, direct system, pressure, and true Neumann trace all
+    # share one honest precision contract.
     neumann_dtype = np.complex64 if config.precision == "single" else np.complex128
     neumann_total = (g_drv + g_robin).astype(neumann_dtype)
     neumann_fun = bempp_api.GridFunction(
@@ -682,21 +691,6 @@ def solve_single_frequency(
     else:
         k = k_real
 
-    start = time.perf_counter()
-    backend = resolve_assembly_backend(config).effective_backend
-    op_kwargs_low = _operator_kwargs(
-        backend, config.precision, config.opencl_device, config.slp_dlp_quadrature,
-        config.slp_dlp_singular_quadrature,
-        vectorization_mode=getattr(config, "vectorization_mode", "auto"),
-    )
-    op_kwargs_high = _operator_kwargs(
-        backend, config.precision, config.opencl_device, config.hyp_adlp_quadrature,
-        vectorization_mode=getattr(config, "vectorization_mode", "auto"),
-    )
-    phase_timings["backend_setup_s"] = time.perf_counter() - start
-
-    n_tris = grid.number_of_elements
-
     # Impedance / Robin BC: filter to tags actually present in the mesh.
     active_impedance: dict[int, complex] = {}
     if config.impedance_sources:
@@ -710,10 +704,47 @@ def solve_single_frequency(
                 continue
             active_impedance[tag] = beta
 
+    # The direct Robin system is materialized and solved as complex128 for
+    # robustness. Promote its operator assembly and traces as well instead of
+    # silently exposing a mixed single/double path.
+    effective_precision = "double" if active_impedance else config.precision
+
+    start = time.perf_counter()
+    backend_resolution = resolve_assembly_backend(
+        config, required_precision=effective_precision,
+    )
+    backend = backend_resolution.effective_backend
+    op_kwargs_low = _operator_kwargs(
+        backend, effective_precision, config.opencl_device,
+        config.slp_dlp_quadrature, config.slp_dlp_singular_quadrature,
+        vectorization_mode=getattr(config, "vectorization_mode", "auto"),
+    )
+    op_kwargs_high = _operator_kwargs(
+        backend, effective_precision, config.opencl_device,
+        config.hyp_adlp_quadrature,
+        vectorization_mode=getattr(config, "vectorization_mode", "auto"),
+    )
+    phase_timings["backend_setup_s"] = time.perf_counter() - start
+
+    n_tris = grid.number_of_elements
+    if active_impedance:
+        effective_solver = LinearSolver.LU
+    else:
+        solver_element_count = (
+            symmetry_context.reduced_element_count
+            if symmetry_context is not None
+            else n_tris
+        )
+        effective_solver = _choose_solver(config, solver_element_count)
+
     field_pressure = None
     field_neumann = None
     if active_impedance:
-        impedance_config = replace(config, impedance_sources=active_impedance)
+        impedance_config = replace(
+            config,
+            impedance_sources=active_impedance,
+            precision=effective_precision,
+        )
         (
             p_surface,
             neumann_fun,
@@ -813,6 +844,18 @@ def solve_single_frequency(
         converged=converged,
         timing_s=elapsed,
         phase_timings=phase_timings,
+        requested_precision=config.precision,
+        effective_precision=effective_precision,
+        requested_solver=config.solver.value,
+        effective_solver=effective_solver.value,
+        requested_backend=getattr(
+            backend_resolution, "requested_backend", config.assembly_backend,
+        ),
+        effective_backend=backend_resolution.effective_backend,
+        backend_fallback_used=getattr(
+            backend_resolution, "fallback_used", False,
+        ),
+        backend_fallback_reason=getattr(backend_resolution, "reason", None),
         field_pressure_on_surface=field_pressure,
         field_neumann_data=field_neumann,
     )

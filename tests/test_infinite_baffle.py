@@ -230,9 +230,16 @@ def test_bempp_coupled_ib_solves_forward_only_and_enforces_aperture_continuity()
     airy_db = 20.0 * np.log10(np.abs(airy))
     np.testing.assert_allclose(result.spl_db[0, 0, :4], airy_db, atol=0.05)
     diagnostics = result.solver_log[0]["native_diagnostics"]
+    assert result.solver_log[0]["requested_solver"] == "gmres"
+    assert result.solver_log[0]["effective_solver"] == "lu"
+    assert result.solver_log[0]["requested_backend"] == "numba"
+    assert result.solver_log[0]["effective_backend"] == "numba"
+    assert result.solver_log[0]["fallback_used"] is False
     assert diagnostics["coupled_ib"] is True
     assert diagnostics["field"] == "rayleigh_aperture_only"
     assert diagnostics["aperture_velocity_basis"] == "DP0"
+    assert diagnostics["requested_backend"] == "numba"
+    assert diagnostics["effective_backend"] == "numba"
     assert diagnostics["aperture_pressure_continuity_rel"] < 1.0e-10
 
 
