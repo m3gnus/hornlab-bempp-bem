@@ -618,8 +618,14 @@ def run_sweep_parallel(
             while pending:
                 done, pending = wait(pending, timeout=0.2)
                 drain_progress()
-                for fut in done:
-                    idx = futures[fut]
+                # Drain ``done`` rather than iterating it: a completed Future
+                # keeps its payload in ``_result``, so a set that still holds
+                # every future of this batch pins every chunk in it. Popping
+                # here and popping ``futures`` below leaves no reference once
+                # the chunk has been merged.
+                while done:
+                    fut = done.pop()
+                    idx = futures.pop(fut)
                     worker_result = fut.result()
                     if config.return_surface_traces:
                         (
@@ -684,6 +690,23 @@ def run_sweep_parallel(
                             and chunk_sphere_pressure is not None
                         ):
                             sphere_pressure_all[global_i] = chunk_sphere_pressure[local_i]
+                    # This chunk is now inside the preallocated full-sweep
+                    # arrays, so drop every remaining reference to its own copy.
+                    #
+                    # ``futures`` used to hold every chunk for the whole merge,
+                    # and a completed ``Future`` keeps its payload alive in
+                    # ``_result``. With ``return_surface_traces`` that payload is
+                    # the chunk's complex128 pressure and Neumann traces, so
+                    # every chunk stayed resident alongside the full-sweep arrays
+                    # it had already been copied into: peak was about twice
+                    # ``estimate_field_trace_retention_bytes``, which counts one
+                    # copy. The retention cap could therefore admit a solve that
+                    # then needed double the budget it was checked against.
+                    del fut
+                    worker_result = None
+                    chunk_pressure = chunk_spl = chunk_imp = chunk_log = None
+                    chunk_surface_pressure = chunk_sphere_pressure = None
+                    chunk_pressure_traces = chunk_neumann_traces = None
                     logger.info(
                         "Completed chunk: %d frequencies", len(idx),
                     )
