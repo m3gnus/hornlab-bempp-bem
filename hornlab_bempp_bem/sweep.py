@@ -39,13 +39,16 @@ logger = logging.getLogger(__name__)
 
 def _solver_log_entry(fr: FrequencyResult) -> dict:
     """Build the diagnostic fields shared by every sweep execution path."""
-    return {
+    entry = {
         "frequency_hz": fr.frequency_hz,
         "iterations": fr.iterations,
         "converged": fr.converged,
         "timing_s": fr.timing_s,
         "phase_timings": dict(fr.phase_timings),
     }
+    if fr.regular_quadrature:
+        entry["regular_quadrature"] = dict(fr.regular_quadrature)
+    return entry
 
 
 def _retained_surface_traces(

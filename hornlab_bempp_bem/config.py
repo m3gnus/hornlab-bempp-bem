@@ -169,6 +169,34 @@ class SolveConfig:
     slp_dlp_singular_quadrature: int = 4
     hyp_adlp_quadrature: int = 4
 
+    # Wavelength-adaptive regular quadrature (opt-in; ported from
+    # boundary-lab's BEAT Engine CPU "Dynamic Quadrature"). When enabled,
+    # each frequency computes k*h with h = sqrt(p90 element area) on the
+    # solve grid; while adaptive_quadrature_kh_min <= k*h <=
+    # adaptive_quadrature_kh_max, regular (non-adjacent pair) assembly runs
+    # at adaptive_quadrature_low_order instead of slp_dlp_quadrature /
+    # hyp_adlp_quadrature. Singular
+    # quadrature (slp_dlp_singular_quadrature) and far-field evaluation are
+    # never reduced. Disabled by default so every existing solve is
+    # bit-identical to before.
+    #
+    # Note bempp-cl's regular "order" maps to Gauss point counts
+    # 1/3/4/6 for orders 1-4 (pair cost ~ points^2), which is a different
+    # scale from BEAT's q1/q2/q4 rules, so the thresholds here are tuned
+    # against the ABEC/ASRO references rather than copied from BEAT's 2.0.
+    #
+    # adaptive_quadrature_kh_min is a departure from BEAT justified by that
+    # tuning: on the ASRO68 reference, order 2 vs a converged order-6 anchor
+    # is 0.15-0.21 dB rms in the main lobe for k*h < ~0.3 (slow-converging
+    # near-pair error on a polar that is flat enough to expose it; order 3
+    # is no better), but only 0.02-0.04 dB rms for k*h in [0.4, 1.8].
+    # 0.0 disables the lower bound, recovering BEAT's pure upper-threshold
+    # behavior.
+    adaptive_quadrature: bool = False
+    adaptive_quadrature_kh_min: float = 0.4
+    adaptive_quadrature_kh_max: float = 2.0
+    adaptive_quadrature_low_order: int = 2
+
     # Linear solver
     solver: LinearSolver = LinearSolver.GMRES
     lu_threshold: int = 6000
@@ -308,6 +336,35 @@ class SolveConfig:
             raise ValueError(
                 "velocity_mode must be 'velocity' or 'acceleration'"
             ) from None
+        if not isinstance(self.adaptive_quadrature, bool):
+            raise ValueError("adaptive_quadrature must be a boolean")
+        for field_name in (
+            "adaptive_quadrature_kh_min", "adaptive_quadrature_kh_max",
+        ):
+            try:
+                value = float(getattr(self, field_name))
+            except (TypeError, ValueError, OverflowError):
+                value = float("nan")
+            if not isfinite(value) or value < 0.0:
+                raise ValueError(
+                    f"{field_name} must be finite and non-negative"
+                )
+            setattr(self, field_name, value)
+        if self.adaptive_quadrature_kh_min > self.adaptive_quadrature_kh_max:
+            raise ValueError(
+                "adaptive_quadrature_kh_min must not exceed "
+                "adaptive_quadrature_kh_max"
+            )
+        if (
+            not _is_integral_value(self.adaptive_quadrature_low_order)
+            or self.adaptive_quadrature_low_order < 1
+        ):
+            raise ValueError(
+                "adaptive_quadrature_low_order must be a positive integer"
+            )
+        self.adaptive_quadrature_low_order = int(
+            self.adaptive_quadrature_low_order
+        )
         if self.precision not in {"single", "double"}:
             raise ValueError("precision must be 'single' or 'double'")
         if self.assembly_backend not in {"opencl", "numba", "auto"}:

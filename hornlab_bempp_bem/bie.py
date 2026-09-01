@@ -40,6 +40,9 @@ class FrequencyResult:
     phase_timings: dict[str, float] = field(default_factory=dict)
     field_pressure_on_surface: object | None = None
     field_neumann_data: object | None = None
+    # Regular-quadrature selection diagnostics; populated when
+    # config.adaptive_quadrature is enabled (see _select_regular_quadrature).
+    regular_quadrature: dict = field(default_factory=dict)
 
 
 def _choose_solver(config: SolveConfig, n_triangles: int) -> LinearSolver:
@@ -78,6 +81,51 @@ def _operator_kwargs(
             params.quadrature.singular = int(singular_quadrature_order)
         kwargs["parameters"] = params
     return kwargs
+
+
+def _p90_element_length(grid) -> float:
+    """Characteristic mesh length h = sqrt(p90 element area), in metres."""
+    areas = np.asarray(grid.volumes, dtype=np.float64)
+    return float(np.sqrt(np.percentile(areas, 90.0)))
+
+
+def _select_regular_quadrature(
+    config: SolveConfig,
+    k_real: float,
+    element_length_m: float,
+) -> tuple[int, int, dict]:
+    """Per-frequency regular quadrature orders and diagnostics.
+
+    Wavelength-adaptive policy ported from boundary-lab's BEAT Engine CPU:
+    while ``adaptive_quadrature_kh_min <= k*h <= adaptive_quadrature_kh_max``
+    the regular (non-adjacent pair) orders drop to
+    ``adaptive_quadrature_low_order``; outside the window the configured
+    base orders apply unchanged. The lower bound is a tuned departure from
+    BEAT (see SolveConfig); 0.0 recovers their pure upper threshold.
+    Singular quadrature is never touched. Returns
+    ``(slp_dlp_order, hyp_adlp_order, diagnostics)``.
+    """
+    slp_order = config.slp_dlp_quadrature
+    hyp_order = config.hyp_adlp_quadrature
+    if not config.adaptive_quadrature:
+        return slp_order, hyp_order, {}
+    kh = float(k_real) * float(element_length_m)
+    if config.adaptive_quadrature_kh_min <= kh <= config.adaptive_quadrature_kh_max:
+        # Never raise an order above its configured base.
+        slp_order = min(slp_order, config.adaptive_quadrature_low_order)
+        hyp_order = min(hyp_order, config.adaptive_quadrature_low_order)
+    diagnostics = {
+        "mode": "wavelength",
+        "slp_dlp_order": int(slp_order),
+        "hyp_adlp_order": int(hyp_order),
+        "base_slp_dlp_order": int(config.slp_dlp_quadrature),
+        "base_hyp_adlp_order": int(config.hyp_adlp_quadrature),
+        "element_length_m": float(element_length_m),
+        "kh": kh,
+        "kh_min": float(config.adaptive_quadrature_kh_min),
+        "kh_max": float(config.adaptive_quadrature_kh_max),
+    }
+    return slp_order, hyp_order, diagnostics
 
 
 def _setup_function_spaces(grid):
@@ -684,13 +732,29 @@ def solve_single_frequency(
 
     start = time.perf_counter()
     backend = resolve_assembly_backend(config).effective_backend
+    if config.adaptive_quadrature:
+        slp_dlp_order, hyp_adlp_order, quadrature_diag = (
+            _select_regular_quadrature(config, k_real, _p90_element_length(grid))
+        )
+        if slp_dlp_order != config.slp_dlp_quadrature:
+            logger.info(
+                "%.1f Hz: k*h=%.2f in [%.2f, %.2f], regular quadrature "
+                "order %d (base %d)",
+                frequency_hz, quadrature_diag["kh"],
+                quadrature_diag["kh_min"], quadrature_diag["kh_max"],
+                slp_dlp_order, config.slp_dlp_quadrature,
+            )
+    else:
+        slp_dlp_order = config.slp_dlp_quadrature
+        hyp_adlp_order = config.hyp_adlp_quadrature
+        quadrature_diag = {}
     op_kwargs_low = _operator_kwargs(
-        backend, config.precision, config.opencl_device, config.slp_dlp_quadrature,
+        backend, config.precision, config.opencl_device, slp_dlp_order,
         config.slp_dlp_singular_quadrature,
         vectorization_mode=getattr(config, "vectorization_mode", "auto"),
     )
     op_kwargs_high = _operator_kwargs(
-        backend, config.precision, config.opencl_device, config.hyp_adlp_quadrature,
+        backend, config.precision, config.opencl_device, hyp_adlp_order,
         vectorization_mode=getattr(config, "vectorization_mode", "auto"),
     )
     phase_timings["backend_setup_s"] = time.perf_counter() - start
@@ -815,4 +879,5 @@ def solve_single_frequency(
         phase_timings=phase_timings,
         field_pressure_on_surface=field_pressure,
         field_neumann_data=field_neumann,
+        regular_quadrature=quadrature_diag,
     )
