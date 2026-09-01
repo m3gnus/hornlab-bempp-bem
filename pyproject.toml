@@ -31,6 +31,16 @@ dependencies = [
 opencl = ["pyopencl"]
 dev = ["pytest", "pyopencl"]
 
+# State the package explicitly rather than letting setuptools guess. Flat-layout
+# auto-discovery fails the moment a second top-level directory appears that is
+# not on setuptools' conventional exclude list: adding runs/ for benchmark
+# artefacts broke `pip install -e .` on every platform with "Multiple top-level
+# packages discovered in a flat-layout: ['runs', 'hornlab_bempp_bem']", while
+# scripts/ had been harmless because setuptools excludes that name by default.
+# Naming the package makes any future top-level directory a non-event.
+[tool.setuptools]
+packages = ["hornlab_bempp_bem"]
+
 [tool.pytest.ini_options]
 markers = [
     "slow: validation tests that run a real BEM solve",
