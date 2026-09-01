@@ -212,6 +212,23 @@ class SolveConfig:
         default_factory=lambda: {2: 1.0}
     )
     velocity_profile: Literal["piston", "dome", "ring"] = "piston"
+
+    # Multi-channel drive with crossovers (opt-in; parity with BEAT's
+    # radiator/channel layer). Each Channel owns a disjoint subset of
+    # velocity_sources' tags and contributes a complex, frequency-dependent
+    # coefficient -- polarity, level, delay, highpass, lowpass -- multiplying
+    # that tag's prescribed normal velocity. Every driven tag must belong to
+    # exactly one channel.
+    #
+    # This costs nothing at solve time: the coefficient folds into the Neumann
+    # data, so a two-way system with its crossover in place is still one solve
+    # per frequency. Use solve_channel_basis() instead when the crossover
+    # itself is the thing being tuned -- it solves each channel once and
+    # leaves the sum to be re-taken without re-solving.
+    #
+    # Empty by default, in which case velocity_sources drives the mesh exactly
+    # as before.
+    channels: list = field(default_factory=list)
     # Direction the prescribed source velocity acts in. "normal" (default) drives
     # each source face along its own outward normal (breathing cap); "axial"
     # drives the source as a rigid piston along its axis (v_n = U*(n_hat.axis)).
@@ -427,6 +444,15 @@ class SolveConfig:
                 )
         if self.source_motion not in {SourceMotion.NORMAL, SourceMotion.AXIAL}:
             raise ValueError("source_motion must be 'normal' or 'axial'")
+        if self.channels:
+            from .channels import Channel, validate_channels
+
+            if not all(isinstance(item, Channel) for item in self.channels):
+                raise ValueError(
+                    "channels must be a list of hornlab_bempp_bem.Channel"
+                )
+            self.channels = list(self.channels)
+            validate_channels(self.channels, self.velocity_sources)
         if self.velocity_profile != "piston":
             raise NotImplementedError(
                 "hornlab-bempp-bem only supports velocity_profile='piston'; "

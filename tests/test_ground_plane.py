@@ -23,7 +23,6 @@ from hornlab_bempp_bem.config import (
 )
 from hornlab_bempp_bem.symmetry import _image_signs, expand_symmetry_mesh
 
-
 # ---------------------------------------------------------------------------
 # Image group
 # ---------------------------------------------------------------------------
@@ -344,9 +343,9 @@ def test_ground_plane_composes_with_a_reduced_quarter_mesh():
     """
     _require_bempp_cpu()
 
-    from hornlab_bempp_bem.symmetry import expand_symmetry_mesh
-
     import bempp_cl.api as bempp_api
+
+    from hornlab_bempp_bem.symmetry import expand_symmetry_mesh
 
     grid = bempp_api.shapes.regular_sphere(3)
     verts = np.asarray(grid.vertices, dtype=np.float64).T * 0.15

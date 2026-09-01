@@ -668,6 +668,22 @@ def solve_single_frequency(
     ∂p/∂n = i·k·β·p directly into the BIE for a single LU solve.
     """
     reject_unsupported_native_symmetry(config)
+    if config.channels:
+        # Channels are a frequency-dependent complex weight on each tag's
+        # prescribed normal velocity, and nothing downstream of the boundary
+        # condition needs to know they exist -- so resolve them here, once,
+        # into the same velocity_sources mapping the rigid path already
+        # consumes. The tag set is unchanged, which keeps the impedance tag,
+        # the axial element scale, and the source-tag validation intact.
+        from .channels import resolve_channel_drives
+
+        config = replace(
+            config,
+            velocity_sources=resolve_channel_drives(
+                config.channels, config.velocity_sources, frequency_hz,
+            ),
+            channels=[],
+        )
     if uses_image_assembly(config) and config.impedance_sources:
         raise NotImplementedError(
             "native half/quarter symmetry with Robin impedance boundaries "

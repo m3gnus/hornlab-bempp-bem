@@ -76,3 +76,129 @@ class SolveResult:
     def directivity_db(self) -> NDArray[np.float64]:
         """hornlab_metal_bem-compatible name for spl_db."""
         return self.spl_db
+
+
+@dataclass
+class ChannelBasisResult:
+    r"""Per-channel pressure at unit drive, plus the synthesis that sums it.
+
+    One :class:`SolveResult` per channel, each solved with only that channel's
+    source tags driven and the channel's own DSP set aside. Because the
+    boundary integral equation is linear in the prescribed Neumann data, any
+    weighted sum of these rows is the solve that would have resulted from
+    driving the channels together -- so a crossover can be re-tuned by
+    re-summing rather than re-solving.
+
+    ``pressure_complex`` is ``(C, F, P, N)``, channel-major, in the solver's
+    :math:`e^{-i\omega t}` convention.
+    """
+
+    channel_names: tuple[str, ...]
+    channels: tuple  # tuple[Channel, ...]; typed loosely to avoid a cycle
+    frequencies_hz: NDArray[np.float64]
+
+    # (C, F, P, N_angles) complex pressure per channel at unit channel drive.
+    pressure_complex: NDArray[np.complex128]
+    # (C, F) raw area-weighted source pressure per channel at unit drive.
+    impedance: NDArray[np.complex128]
+
+    observation_angles_deg: NDArray[np.float64]
+    observation_points: NDArray[np.float64]
+    observation_planes: list[str]
+
+    config: SolveConfig
+    mesh_info: MeshInfo
+    results: tuple = ()  # tuple[SolveResult, ...], one per channel
+    timings: dict[str, float] = field(default_factory=dict)
+
+    # (C, F, M) per-channel spherical field, when observation.sphere_grid is set.
+    sphere_pressure_complex: NDArray[np.complex128] | None = None
+    sphere_theta_deg: NDArray[np.float64] | None = None
+    sphere_phi_deg: NDArray[np.float64] | None = None
+
+    # tag -> (C, F) area-weighted surface pressure on every driven tag, for
+    # every channel. Cross terms are included: a channel excites all tags, not
+    # only the ones it drives.
+    surface_pressure_avg: dict[int, NDArray[np.complex128]] | None = None
+
+    def synthesize(
+        self,
+        channels=None,
+        *,
+        flat_target: bool = False,
+        flat_target_plane: int = 0,
+        flat_target_angle_index: int | None = None,
+    ) -> SolveResult:
+        """Sum the basis under ``channels`` and return an ordinary result.
+
+        ``channels`` defaults to the channels the basis was solved with; pass a
+        re-tuned list, in the same order, to change the crossover without
+        re-solving. ``flat_target`` divides each channel by the magnitude of
+        its own pressure at the reference point first, so the synthesized
+        response is the crossover's own shape rather than the crossover
+        multiplied by each driver's native rolloff -- BEAT's
+        ``flat_target_normalization``. The reference defaults to the on-axis
+        angle of the first observation plane, which is where BEAT's default
+        ``flat_target_reference_angle_deg=0`` lands.
+        """
+        from .channels import flat_target_corrections, synthesize_channel_pressure
+        from .sweep import _normalized_spl_db
+
+        channels = tuple(self.channels if channels is None else channels)
+        if len(channels) != len(self.channels):
+            raise ValueError(
+                f"synthesize needs {len(self.channels)} channels in the basis "
+                f"order {self.channel_names}, got {len(channels)}"
+            )
+        corrections = None
+        if flat_target:
+            if flat_target_angle_index is None:
+                flat_target_angle_index = int(
+                    np.argmin(np.abs(self.observation_angles_deg))
+                )
+            corrections = flat_target_corrections(
+                self.pressure_complex[
+                    :, :, flat_target_plane, flat_target_angle_index
+                ],
+            )
+
+        pressure = synthesize_channel_pressure(
+            self.pressure_complex, channels, self.frequencies_hz,
+            corrections=corrections,
+        )
+        impedance = synthesize_channel_pressure(
+            self.impedance, channels, self.frequencies_hz,
+            corrections=corrections,
+        )
+        sphere = None
+        if self.sphere_pressure_complex is not None:
+            sphere = synthesize_channel_pressure(
+                self.sphere_pressure_complex, channels, self.frequencies_hz,
+                corrections=corrections,
+            )
+        surface = None
+        if self.surface_pressure_avg is not None:
+            surface = {
+                tag: synthesize_channel_pressure(
+                    values, channels, self.frequencies_hz,
+                    corrections=corrections,
+                )
+                for tag, values in self.surface_pressure_avg.items()
+            }
+        on_axis = int(np.argmin(np.abs(self.observation_angles_deg)))
+        return SolveResult(
+            frequencies_hz=self.frequencies_hz,
+            pressure_complex=pressure,
+            spl_db=_normalized_spl_db(pressure, on_axis),
+            impedance=impedance,
+            observation_angles_deg=self.observation_angles_deg,
+            observation_points=self.observation_points,
+            observation_planes=list(self.observation_planes),
+            config=self.config,
+            mesh_info=self.mesh_info,
+            timings=dict(self.timings),
+            surface_pressure_avg=surface,
+            sphere_pressure_complex=sphere,
+            sphere_theta_deg=self.sphere_theta_deg,
+            sphere_phi_deg=self.sphere_phi_deg,
+        )

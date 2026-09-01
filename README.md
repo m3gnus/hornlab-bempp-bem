@@ -271,6 +271,69 @@ through `sphere_theta_max_deg` (180° by default); phi wraps around the axis
 without a duplicate 360° column. This field is independent of the selected
 display planes and is suitable for solid-angle directivity integration.
 
+## Channels and Crossovers
+
+`velocity_sources` maps each physical tag to its own drive weight. `channels`
+groups those tags into amplifier outputs and gives each one a level, a
+polarity, a delay, and a highpass and lowpass section:
+
+```python
+from hornlab_bempp_bem import Channel, Crossover, SolveConfig, solve
+
+config = SolveConfig(
+    velocity_sources={2: 1.0, 3: 0.6},
+    channels=[
+        Channel("lf", [2],
+                lowpass=Crossover("lowpass", 1500.0, "linkwitz_riley", 4)),
+        Channel("hf", [3], level_db=-2.5, polarity=-1, delay_ms=0.15,
+                highpass=Crossover("highpass", 1500.0, "linkwitz_riley", 4)),
+    ],
+)
+result = solve("two-way.msh", config)
+```
+
+Butterworth orders 1, 2, 4, 6 and Linkwitz-Riley 2, 4, 6 (a Butterworth
+section of half the order, cascaded twice). Every driven tag must belong to
+exactly one channel — two channels on one tag would need two prescribed normal
+velocities on the same faces.
+
+A channel's coefficient folds into the Neumann data, so a crossed-over
+multi-way system is still **one solve per frequency**. Give `Channel.sources`
+a mapping instead of a list for a relative gain, complex if you want a fixed
+relative phase, between radiators on the same channel.
+
+### Tuning the crossover without re-solving
+
+```python
+from hornlab_bempp_bem import solve_channel_basis
+
+basis = solve_channel_basis("two-way.msh", config)   # one sweep per channel
+result = basis.synthesize()                          # as if solved together
+tweaked = basis.synthesize(other_channels)           # re-tuned, no re-solve
+flat = basis.synthesize(flat_target=True)            # per-channel normalised
+```
+
+The boundary integral equation is linear in the prescribed Neumann data, so
+any weighted sum of the per-channel rows *is* the solve that driving them
+together would produce — measured agreement is at solver round-off. Use this
+when the crossover is the thing being tuned; use `solve()` with `channels` set
+when it is fixed, since that is a single sweep.
+
+`flat_target=True` divides each channel by the magnitude of its own pressure
+at the reference point first, so the synthesized response is the crossover's
+own shape rather than the crossover multiplied by each driver's native
+rolloff. It normalises magnitude only; each channel keeps its acoustic phase.
+
+### Phase convention
+
+This package uses `e^{-iωt}`, so filters are evaluated at `s = -iω` and a
+delay of τ is `e^{+iωτ}`. Both are the opposite sign from the `e^{+iωt}` form
+in most filter texts. The responses are therefore the complex conjugates of
+the standard-audio ones — identical in magnitude, which is why a sign error
+here is invisible on a magnitude plot and wrong the moment two channels sum.
+The implementation is checked against `scipy.signal.butter` conjugated into
+this convention, and agrees with BEAT's own DSP to 2e-15.
+
 ## Formulations
 
 `BIEFormulation.STANDARD` is the default direct Helmholtz boundary integral
