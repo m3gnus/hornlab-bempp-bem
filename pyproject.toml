@@ -13,7 +13,14 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.21",
-    "bempp-cl>=0.4,<0.5",
+    # Floor is the version this package is actually exercised against. Upstream
+    # bempp-cl runs no Windows or macOS CI, so "it installed" is not evidence it
+    # solves -- scripts/windows_smoke.py is what establishes that, and 0.4.2 is
+    # what it has been run against. Note 0.4.2 imports as `bempp_cl`, not
+    # `bempp`. Keep the <0.5 cap: this package reaches into bempp-cl internals
+    # (see _opencl_program_cache and _opencl_singular_workgroup), so a minor
+    # bump needs the smoke test re-run rather than assumed.
+    "bempp-cl>=0.4.2,<0.5",
     "meshio>=5.0",
     # bie.py calls scipy.linalg directly; until now scipy only arrived
     # transitively via bempp-cl.
