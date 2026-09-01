@@ -140,6 +140,25 @@ def test_body_resting_on_the_ground_welds_its_footprint():
     assert expanded.vertices_nx3.shape[0] == 2 * verts.shape[0] - 4
 
 
+def test_a_model_hovering_a_sub_element_gap_above_the_ground_warns(caplog):
+    """Near-singular against its own image, but not adjacent to it.
+
+    Bempp's singular rule owns coincident and edge/vertex-adjacent pairs. A
+    detached image is neither, so the regular rule integrates a nearly
+    singular kernel and quietly loses accuracy.
+    """
+    verts, tris, tags = _open_box(0.0005, 0.35, drop_bottom=False)
+    with caplog.at_level(logging.WARNING, logger="hornlab_bempp_bem.symmetry"):
+        expand_symmetry_mesh(verts, tris, tags, None, ground_plane="xy")
+    assert "near-singularly close to their own ground images" in caplog.text
+
+    caplog.clear()
+    verts, tris, tags = _open_box(0.30, 0.60, drop_bottom=False)
+    with caplog.at_level(logging.WARNING, logger="hornlab_bempp_bem.symmetry"):
+        expand_symmetry_mesh(verts, tris, tags, None, ground_plane="xy")
+    assert "near-singularly" not in caplog.text
+
+
 def test_a_closed_body_sitting_on_the_ground_is_rejected():
     """Its bottom face would coincide with its own image."""
     verts, tris, tags = _open_box(0.0, 0.35, drop_bottom=False)

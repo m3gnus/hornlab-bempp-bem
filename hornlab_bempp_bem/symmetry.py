@@ -292,6 +292,50 @@ def _require_seamless_expansion(
     )
 
 
+# Below this gap-to-element-size ratio, a detached model's elements sit
+# near-singularly close to their own ground images while remaining
+# topologically unrelated to them, so Bempp's singular rule does not own the
+# pair and the regular rule has to integrate a nearly singular kernel.
+# Measured on a driven sphere at 2 kHz against a converged order-8 solve: at
+# the package's default regular order 4 the error stays under 6e-4 dB for
+# gap/h >= 0.18 and rises to 0.16 dB at gap/h = 0.04. 0.2 is the knee.
+_GROUND_GAP_ELEMENT_RATIO = 0.2
+
+
+def _warn_if_hovering_over_ground(
+    vertices: NDArray[np.float64],
+    triangles: NDArray[np.int64],
+    plane_name: str,
+    axis: str,
+    gap_m: float,
+) -> None:
+    """Warn when a model floats a sub-element distance above its ground plane.
+
+    Either rest the model on the plane -- then the footprint welds and the
+    singular rule owns the seam pairs -- or keep it clear by a reasonable
+    fraction of an element. A gap far below the element size is also rarely
+    intentional: it usually means the mesh was meant to sit on the plane and
+    missed.
+    """
+    areas = _triangle_areas(vertices, triangles)
+    if areas.size == 0:
+        return
+    element_length = float(np.sqrt(np.percentile(areas, 90.0)))
+    if element_length <= 0.0 or gap_m >= _GROUND_GAP_ELEMENT_RATIO * element_length:
+        return
+    logger.warning(
+        "model clears its %r ground plane by only %.3g m in %s, which is "
+        "%.2f of the element size %.3g m. Its elements are near-singularly "
+        "close to their own ground images but not adjacent to them, so the "
+        "regular quadrature rule has to integrate a nearly singular kernel: "
+        "expect around 0.1 dB of error at the default regular order. Rest the "
+        "model on the plane so the footprint welds, lift it to at least %.3g "
+        "m, or raise slp_dlp_quadrature.",
+        plane_name, gap_m, axis, gap_m / element_length, element_length,
+        _GROUND_GAP_ELEMENT_RATIO * element_length,
+    )
+
+
 def expand_symmetry_mesh(
     vertices_nx3: NDArray[np.floating],
     triangles_nx3: NDArray[np.integer],
@@ -385,6 +429,10 @@ def expand_symmetry_mesh(
             # what the seam checks validate -- so classify by geometry.
             if touches_plane:
                 seam_names.append(name)
+            else:
+                _warn_if_hovering_over_ground(
+                    vertices, triangles, name, axis, float(values.min()),
+                )
             continue
         seam_names.append(name)
         # A reduced mesh that never reaches its own mirror plane is not the

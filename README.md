@@ -233,6 +233,29 @@ cut, so that the union of body and image is one closed body, and the usual
 seam validation applies. A closed body whose bottom face lies in the plane is
 refused, because that face would coincide with its own image.
 
+### Standing very close to the plane
+
+Bempp's singular quadrature owns coincident and adjacent element pairs. A
+detached image is neither, so a model hovering a small fraction of an element
+above the plane has elements that are near-singularly close to their own
+images with only the regular rule to integrate them. Measured on a driven
+sphere at 2 kHz against a converged order-8 solve, at the default regular
+order 4:
+
+| gap / element size | error vs converged |
+| --- | --- |
+| 10.8 | 4.8e-4 dB |
+| 1.8 | 1.2e-4 dB |
+| 0.18 | 5.9e-4 dB |
+| 0.04 | 1.6e-1 dB |
+
+So keep the gap above roughly a fifth of an element, or rest the model on the
+plane — then the footprint welds and the singular rule takes over. Below that
+ratio the expansion warns. Raising `slp_dlp_quadrature` recovers most of it
+(0.011 dB at order 6 for the 0.04 case). BEAT solves this properly, with a
+per-face-pair near-correction cache keyed on distance; bempp-cl has no
+per-pair quadrature override, so the order is global here.
+
 Observation points below the plane are warned about, not clipped: the
 representation formula is even about the plane, so pressure returned there is
 the mirror of the point above it rather than a field inside the rigid half
