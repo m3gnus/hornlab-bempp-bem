@@ -44,6 +44,8 @@ class SourceMotion:
 
 AssemblyBackend = Literal["opencl", "numba", "auto"]
 NativeSymmetryPlane = Literal["yz", "xz", "xy", "yz+xz"]
+GroundPlane = Literal["yz", "xz", "xy"]
+GROUND_PLANES = ("yz", "xz", "xy")
 VectorizationMode = Literal["auto", "novec", "vec4", "vec8", "vec16"]
 VECTORIZATION_MODES = ("auto", "novec", "vec4", "vec8", "vec16")
 _MAX_SPHERE_POINTS = 100_000
@@ -253,6 +255,30 @@ class SolveConfig:
     # measured. Set it explicitly if you have benchmarked your own host.
     vectorization_mode: VectorizationMode = "auto"
     native_symmetry_plane: NativeSymmetryPlane | None = None
+
+    # Rigid half-space ground plane (opt-in; parity with BEAT's
+    # ``symmetry_mode=:ground``). Names the coordinate plane acting as an
+    # infinite, perfectly rigid boundary: "yz" is x=0, "xz" is y=0 -- BEAT's
+    # only choice -- and "xy" is z=0, the natural floor. The whole model must
+    # lie in the non-negative half space of the mirrored coordinate; the plane
+    # always passes through the origin, so a caller wanting a different height
+    # translates the mesh.
+    #
+    # Implemented as an image source with reflection coefficient +1 and no
+    # sign flip on the pressure, which is the rigid-wall boundary condition.
+    # It reuses the same mirror-image assembly as ``native_symmetry_plane``
+    # and composes with it (the two must name different planes), so a
+    # quarter-symmetric model can stand above a ground plane and pay for four
+    # images on one reduced row block.
+    #
+    # A model standing clear of the plane mirrors into a detached image body.
+    # A model *resting* on the plane is the reduced-mesh case exactly: its
+    # footprint must be an open cut so the union of body and image is one
+    # closed body, and the usual seam validation applies to it.
+    #
+    # None by default, so every existing solve is unchanged.
+    ground_plane: GroundPlane | None = None
+
     restrict_neumann_space: bool = True
 
     # Retain the complete P1 pressure and total DP0 Neumann traces needed to
@@ -384,6 +410,21 @@ class SolveConfig:
             raise ValueError(
                 "native_symmetry_plane must be None, 'yz', 'xz', 'xy', or 'yz+xz'"
             )
+        if self.ground_plane is not None:
+            if self.ground_plane not in GROUND_PLANES:
+                raise ValueError(
+                    "ground_plane must be None, "
+                    + ", ".join(repr(name) for name in GROUND_PLANES)
+                )
+            if self.native_symmetry_plane is not None and self.ground_plane in (
+                str(self.native_symmetry_plane).split("+")
+            ):
+                raise ValueError(
+                    f"ground_plane {self.ground_plane!r} is also declared in "
+                    f"native_symmetry_plane {self.native_symmetry_plane!r}; a "
+                    "reduced mesh's cut plane cannot also be an infinite rigid "
+                    "boundary"
+                )
         if self.source_motion not in {SourceMotion.NORMAL, SourceMotion.AXIAL}:
             raise ValueError("source_motion must be 'normal' or 'axial'")
         if self.velocity_profile != "piston":
@@ -392,6 +433,21 @@ class SolveConfig:
                 "use hornlab-metal-bem source_velocity_profiles for shaped "
                 "source profiles"
             )
+
+
+def uses_image_assembly(config: SolveConfig) -> bool:
+    """Whether this solve runs on the mirror-image (expanded-grid) assembler.
+
+    True for a reduced half/quarter mesh, for a rigid ground plane, and for
+    both together. Every site that used to branch on
+    ``native_symmetry_plane is not None`` asks this instead, so the ground
+    plane reaches the same assembly, field evaluation, and trace-retention
+    paths the reduced meshes already use.
+    """
+    return (
+        config.native_symmetry_plane is not None
+        or config.ground_plane is not None
+    )
 
 
 def reject_unsupported_native_symmetry(config: SolveConfig) -> None:
@@ -407,17 +463,24 @@ def reject_unsupported_native_symmetry(config: SolveConfig) -> None:
             "models ('yz', 'xz', and 'yz+xz'); legacy 'xy' symmetry is not "
             "implemented"
         )
-    if config.native_symmetry_plane is None:
+    if config.native_symmetry_plane is None and config.ground_plane is None:
         return
     # Mirrored by the same guards inside assemble_and_solve_symmetry, which
-    # stay as a backstop for callers reaching that function directly.
+    # stay as a backstop for callers reaching that function directly. A ground
+    # plane rides the same mirror-image assembler, so it inherits the same two
+    # limits.
+    subject = (
+        "a ground plane"
+        if config.native_symmetry_plane is None
+        else "native half/quarter symmetry"
+    )
     if config.formulation is BIEFormulation.BURTON_MILLER:
         raise NotImplementedError(
-            "native half/quarter symmetry currently supports STANDARD and "
+            f"{subject} currently supports STANDARD and "
             "COMPLEX_K formulations; Burton-Miller is not implemented"
         )
     if config.impedance_sources:
         raise NotImplementedError(
-            "native half/quarter symmetry with Robin impedance boundaries "
+            f"{subject} with Robin impedance boundaries "
             "is not implemented yet"
         )

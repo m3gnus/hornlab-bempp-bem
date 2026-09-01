@@ -21,6 +21,7 @@ from .config import (
     SourceMotion,
     VelocityMode,
     reject_unsupported_native_symmetry,
+    uses_image_assembly,
 )
 from .mesh import _require_closed_surface
 
@@ -667,10 +668,7 @@ def solve_single_frequency(
     ∂p/∂n = i·k·β·p directly into the BIE for a single LU solve.
     """
     reject_unsupported_native_symmetry(config)
-    if (
-        config.native_symmetry_plane is not None
-        and config.impedance_sources
-    ):
+    if uses_image_assembly(config) and config.impedance_sources:
         raise NotImplementedError(
             "native half/quarter symmetry with Robin impedance boundaries "
             "is not implemented yet"
@@ -697,11 +695,14 @@ def solve_single_frequency(
     phase_timings: dict[str, float] = {}
 
     start = time.perf_counter()
-    if config.native_symmetry_plane is not None and symmetry_context is None:
+    if uses_image_assembly(config) and symmetry_context is None:
         from .symmetry import build_symmetry_context
 
         symmetry_context = build_symmetry_context(
-            grid, physical_tags, config.native_symmetry_plane,
+            grid,
+            physical_tags,
+            config.native_symmetry_plane,
+            ground_plane=config.ground_plane,
         )
     if config.require_closed_mesh and not closed_mesh_validated:
         validation_grid = (

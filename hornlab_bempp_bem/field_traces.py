@@ -54,6 +54,7 @@ def evaluate_exterior_from_traces(
     points_xyz: NDArray[Any],
     *,
     symmetry_plane: str | None = None,
+    ground_plane: str | None = None,
     assembly_backend: Literal["auto", "opencl", "numba"] = "auto",
     precision: Literal["single", "double"] = "double",
     opencl_device: Literal["cpu", "gpu"] = "cpu",
@@ -83,6 +84,12 @@ def evaluate_exterior_from_traces(
         The solve's native symmetry plane, if any: ``"yz"``, ``"xz"``, or
         ``"yz+xz"``. Coefficients remain in the reduced mesh's DOF order and
         are expanded through the same image map used by the solve.
+    ground_plane:
+        The solve's rigid half-space ground plane, if any: ``"yz"``, ``"xz"``,
+        or ``"xy"``. Adds the same ground image the solve used, so the
+        re-evaluated field is the half-space field rather than the free-field
+        one. Must match the solve's ``SolveConfig.ground_plane``; a mismatch
+        silently changes the physics, not the DOF count.
     assembly_backend, precision, opencl_device, vectorization_mode:
         Bempp potential-operator settings, in double precision. The default
         ``"auto"`` picks the fastest backend the machine can actually run,
@@ -115,6 +122,8 @@ def evaluate_exterior_from_traces(
         raise ValueError("k_real must be finite and positive")
     if symmetry_plane not in {None, "yz", "xz", "yz+xz"}:
         raise ValueError("symmetry_plane must be None, 'yz', 'xz', or 'yz+xz'")
+    if ground_plane not in {None, "yz", "xz", "xy"}:
+        raise ValueError("ground_plane must be None, 'yz', 'xz', or 'xy'")
     if assembly_backend not in {"auto", "opencl", "numba"}:
         raise ValueError("assembly_backend must be 'auto', 'opencl' or 'numba'")
     if precision not in {"single", "double"}:
@@ -138,7 +147,7 @@ def evaluate_exterior_from_traces(
     import bempp_cl.api as bempp_api
 
     grid, physical_tags = _trace_grid(mesh_or_grid)
-    if symmetry_plane is None:
+    if symmetry_plane is None and ground_plane is None:
         p1_space, dp0_space = _setup_function_spaces(grid)
         p_coefficients = _trace_coefficients(
             pressure_p1, p1_space.global_dof_count, "pressure_p1",
@@ -158,7 +167,10 @@ def evaluate_exterior_from_traces(
         if physical_tags is None:
             physical_tags = np.zeros(grid.number_of_elements, dtype=np.int32)
         context = build_symmetry_context(
-            grid, np.asarray(physical_tags, dtype=np.int32), symmetry_plane,
+            grid,
+            np.asarray(physical_tags, dtype=np.int32),
+            symmetry_plane,
+            ground_plane=ground_plane,
         )
         p_coefficients = _trace_coefficients(
             pressure_p1,

@@ -202,6 +202,45 @@ mesh-sensitive near a resonance. Use independently validated frequency points
 for production conclusions until a symmetry-compatible combined-field or
 Burton-Miller path is available.
 
+## Rigid Ground Plane
+
+Set `ground_plane` to model an infinite, perfectly rigid boundary — a floor, a
+half-space measurement, or a large flat baffle the model stands on:
+
+- `"yz"`: rigid plane at `X = 0`, model in `X >= 0`
+- `"xz"`: rigid plane at `Y = 0`, model in `Y >= 0` (BEAT's only choice)
+- `"xy"`: rigid plane at `Z = 0`, model in `Z >= 0`
+
+```python
+config = SolveConfig(ground_plane="xy")            # cabinet on the floor
+config = SolveConfig(native_symmetry_plane="yz",   # ... and mirror-symmetric
+                     ground_plane="xy")
+```
+
+The plane always passes through the origin; translate the mesh to place it at
+a different height. The model must lie entirely on the non-negative side.
+
+This is an image source with reflection coefficient `+1` and no sign flip on
+the pressure, which is what a rigid wall means, and it rides the same
+mirror-image assembler as `native_symmetry_plane` — so the two compose (they
+must name different planes) and a quarter-symmetric model above a ground plane
+pays for four images on one reduced row block. The transform matches BEAT's
+`symmetry_mode=:ground` exactly.
+
+A model standing clear of the plane mirrors into a detached image body. A
+model *resting* on it is the reduced-mesh case: its footprint must be an open
+cut, so that the union of body and image is one closed body, and the usual
+seam validation applies. A closed body whose bottom face lies in the plane is
+refused, because that face would coincide with its own image.
+
+Observation points below the plane are warned about, not clipped: the
+representation formula is even about the plane, so pressure returned there is
+the mirror of the point above it rather than a field inside the rigid half
+space.
+
+A ground plane inherits the image assembler's limits — `STANDARD` and
+`COMPLEX_K` only, no Robin `impedance_sources`.
+
 `ObservationConfig` builds polar observation arcs by default:
 
 ```python

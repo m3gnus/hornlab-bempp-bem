@@ -25,6 +25,7 @@ from .config import (
     SourceMotion,
     VelocityMode,
     reject_unsupported_native_symmetry,
+    uses_image_assembly,
 )
 from .device import OpenCLError, configure_opencl
 from .field_traces import evaluate_exterior_from_traces
@@ -195,7 +196,7 @@ def solve(
         scale=config.mesh_scale,
         require_closed=(
             config.require_closed_mesh
-            and config.native_symmetry_plane is None
+            and not uses_image_assembly(config)
         ),
         native_symmetry_plane=config.native_symmetry_plane,
     )
@@ -253,7 +254,7 @@ def solve_frequencies(
         scale=config.mesh_scale,
         require_closed=(
             config.require_closed_mesh
-            and config.native_symmetry_plane is None
+            and not uses_image_assembly(config)
         ),
         native_symmetry_plane=config.native_symmetry_plane,
     )
