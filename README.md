@@ -300,6 +300,85 @@ Automatic fallback emits one warning per sweep, and every solver-log entry
 records the requested and effective backend, whether fallback occurred, and
 the reason.
 
+### What the Numba fallback costs
+
+Falling back is not cheap, and on a stock install it is quiet. Measured on a
+12-vCPU AVX2 Windows box against a three-rung ASRO68 ladder at 2 kHz, warm
+assembly per frequency (`runs/260901-windows-b0/` carries the raw JSON and the
+benchmark script):
+
+Double precision:
+
+| P1 DOF | Numba   | OpenCL  | ratio |
+| ------ | ------- | ------- | ----- |
+| 1,338  | 2.21 s  | 0.58 s  | 3.8x  |
+| 2,912  | 15.36 s | 2.15 s  | 7.1x  |
+| 4,992  | 67.90 s | 5.85 s  | 11.6x |
+
+Single precision:
+
+| P1 DOF | Numba   | OpenCL  | ratio |
+| ------ | ------- | ------- | ----- |
+| 1,338  | 2.40 s  | 0.38 s  | 6.3x  |
+| 2,912  | 12.27 s | 1.23 s  | 10.0x |
+| 4,992  | 58.07 s | 3.08 s  | 18.9x |
+
+The gap widens with mesh size and is wider in single precision, because OpenCL
+compiles a `vec8` kernel for fp32 against `vec4` for fp64 while Numba gains far
+less from the narrower type. Post-solve field evaluation shows the same
+asymmetry more sharply still: 0.416 s against 0.009 s at 4,992 DOF.
+
+Two figures are worth keeping in view when reading those ratios. The linear
+solve is unaffected — 8.05 s (Numba) against 8.36 s (OpenCL) at 4,992 DOF,
+because it is the same SciPy LU either way — so the ratios describe assembly,
+not end-to-end solve time. And OpenCL wins while using *fewer* cores, not more:
+CPU-time over wall-time was 9.4 for Numba against 5.1 for OpenCL at 4,992 DOF.
+That is a per-core efficiency difference, so throwing threads at the Numba path
+does not close it.
+
+### Checking the OpenCL runtime before you rely on it
+
+`assembly_backend="auto"` already probes, and `"opencl"` already fails fast, so
+the solve path reports a missing device. Post-solve field evaluation is the
+deliberate exception — it falls back so that re-evaluating retained traces keeps
+working on a machine whose solve ran elsewhere — and it now logs a warning when
+it does, once per distinct reason.
+
+To check before committing to a long sweep:
+
+```python
+import hornlab_bempp_bem as bempp_bem
+
+check = bempp_bem.check_opencl("cpu")
+print(check.describe())        # -> "OpenCL OK: assembled on 'AMD Ryzen 7 ...'"
+
+bempp_bem.require_opencl()     # same thing, but raises OpenCLError
+```
+
+`check_opencl` assembles a real operator on a 32-element sphere rather than
+enumerating devices. That is deliberate: neither `pyopencl.get_platforms()` nor
+reading back `bempp_cl.api.DEFAULT_DEVICE_INTERFACE` survives a runtime that is
+present and enumerable but cannot compile — which is exactly the unquoted
+include-path failure described under [Performance](#performance). `check.stage`
+reports how far it got (`pyopencl`, `device`, `assembly`, `ok`). It costs a
+one-off kernel compile that the first real assembly would have paid anyway.
+
+#### Getting a CPU OpenCL runtime
+
+bempp-cl's OpenCL path needs a device of type **CPU**, not GPU. On Windows the
+reference box uses the Intel CPU Runtime for OpenCL Applications, which despite
+the name runs on AMD parts — the measurements above were taken on a Ryzen. It is
+also on PyPI as `intel-opencl-rt`, which ships `win_amd64` wheels, so
+`pip install intel-opencl-rt` is the quickest route. That package is
+**proprietary** (Intel End User License Agreement for Developer Tools), so
+installing it per-machine and redistributing it inside an installer are
+different questions; the second is not settled here. It is deliberately *not*
+declared as a dependency of this package.
+
+On Linux, pocl is the usual permissively-licensed option. macOS exposes only a
+GPU device, so there is no CPU OpenCL path there at all and bempp-cl takes the
+Numba branch unconditionally.
+
 ## Outputs
 
 `solve()` and `solve_frequencies()` return `SolveResult`.
@@ -357,3 +436,27 @@ particular workspace layout, set `HORNLAB_ASRO68_MESH` to the reference mesh,
 and `HORNLAB_VALIDATION_ARTIFACTS` to the validation-artifact directory. The
 ASRO68 gates compare against pinned library results and the independent ABEC
 fixture; they do not depend on Waveguide Generator's deleted legacy solver.
+
+### Smoke test
+
+Upstream bempp-cl runs no Windows or macOS CI, so installing successfully is not
+evidence that this machine can solve. `scripts/windows_smoke.py` establishes that
+end to end — import, device selection, kernel build, assembly, LU solve, field
+evaluation — and additionally asserts that OpenCL and Numba agree, which is the
+only way to catch a runtime that is present and enumerable but wrong.
+
+```bash
+python scripts/windows_smoke.py
+```
+
+It exits non-zero on failure, so it can be wired into CI directly. `--json PATH`
+writes a machine-readable report; `--refinement N` changes the sphere size. The
+OpenCL arm is skipped, not failed, when there is no usable device — the missing
+device is already reported as its own failed check. On the reference Windows box
+the two backends agree to a relative difference of 4.5e-14 at `--refinement 2`.
+
+Note that a deep working directory can fail the suite for an unrelated reason:
+Numba's on-disk cache path can cross Windows' 260-character `MAX_PATH`, which
+surfaces as a `FileNotFoundError` inside `numba.core.caching` rather than as
+anything resembling a path-length problem. Set `NUMBA_CACHE_DIR` to a short path
+if that happens.
