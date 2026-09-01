@@ -1,0 +1,34 @@
+{
+  "geometry": "ASRO68 (ATH bem_mesh.geo, free-standing)",
+  "units": "mm",
+  "driver_patch": {
+    "max_radius_mm": 12.7,
+    "max_z_mm": 2.0
+  },
+  "rungs": [
+    {
+      "target_dof": 1364,
+      "mesh_size_factor": 2.3453125000000004,
+      "p1_dof": 1338,
+      "n_triangles": 2672,
+      "n_driver_elements": 56,
+      "path": "asro68_L1_dof1338.msh"
+    },
+    {
+      "target_dof": 2884,
+      "mesh_size_factor": 1.32265625,
+      "p1_dof": 2912,
+      "n_triangles": 5820,
+      "n_driver_elements": 56,
+      "path": "asro68_L2_dof2912.msh"
+    },
+    {
+      "target_dof": 4984,
+      "mesh_size_factor": 0.93916015625,
+      "p1_dof": 4992,
+      "n_triangles": 9980,
+      "n_driver_elements": 112,
+      "path": "asro68_L3_dof4992.msh"
+    }
+  ]
+}
