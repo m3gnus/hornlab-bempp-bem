@@ -27,7 +27,13 @@ from .config import (
     VelocityMode,
     reject_unsupported_native_symmetry,
 )
-from .device import OpenCLError, configure_opencl
+from .device import (
+    OpenCLCheck,
+    OpenCLError,
+    check_opencl,
+    configure_opencl,
+    require_opencl,
+)
 from .field_traces import evaluate_exterior_from_traces
 from .mesh import (
     LoadedMesh,
@@ -54,8 +60,11 @@ __all__ = [
     "MeshInfo",
     "MeshError",
     "ObservationFrame",
+    "OpenCLCheck",
     "OpenCLError",
+    "check_opencl",
     "configure_opencl",
+    "require_opencl",
     "AssemblyBackendResolution",
     "AssemblyBackendUnavailable",
     "resolve_assembly_backend",
