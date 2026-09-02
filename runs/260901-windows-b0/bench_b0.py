@@ -44,6 +44,7 @@ HERE = Path(__file__).resolve().parent
 LADDER = HERE / "ladder"
 FREQUENCY_HZ = 2000.0
 RUNGS = ("L1", "L2", "L3")
+MESH_SCALE = 0.001   # the ladder is in millimetres
 
 
 # --------------------------------------------------------------------------
@@ -162,7 +163,6 @@ def _config(backend: str, precision: str):
         solver=LinearSolver.LU,
         precision=precision,
         assembly_backend=backend,
-        mesh_scale=0.001,  # the ladder is in millimetres
         return_surface_traces=True,
     )
 
@@ -194,7 +194,15 @@ def measure(mesh_path: Path, backend: str, precision: str) -> dict:
     import hornlab_bempp_bem as bempp_bem
     from hornlab_bempp_bem.mesh import load_mesh
 
-    mesh = load_mesh(str(mesh_path))
+    # scale= belongs on load_mesh, not on SolveConfig. SolveConfig.mesh_scale
+    # only takes effect when the solver loads the mesh itself: _resolve_mesh
+    # returns an already-loaded LoadedMesh untouched, and a test pins that it
+    # must not reload. Passing a pre-loaded mesh plus mesh_scale therefore
+    # scales nothing and silently solves the horn in millimetres-as-metres --
+    # a 411 m horn instead of a 411 mm one, which showed up as a -6 dB
+    # beamwidth of 2.5 degrees at 2 kHz and a 90 dB on-axis disagreement
+    # against BEAT (which takes a path and scales correctly).
+    mesh = load_mesh(str(mesh_path), scale=MESH_SCALE)
     config = _config(backend, precision)
     frequencies = np.array([FREQUENCY_HZ], dtype=np.float64)
 

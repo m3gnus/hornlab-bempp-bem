@@ -31,92 +31,92 @@
     {
       "backend": "numba",
       "threads": 1,
-      "assembly_s": 45.85532449994935,
-      "materialization_s": 0.008826099976431578,
-      "linear_solve_s": 2.006633100041654,
-      "wall_s": 47.97453810001025,
-      "cpu_over_wall": 0.9975994953871119
+      "assembly_s": 38.30471070000203,
+      "materialization_s": 0.00757539999904111,
+      "linear_solve_s": 1.865091499988921,
+      "wall_s": 40.2585151999956,
+      "cpu_over_wall": 0.9955192038479447
     },
     {
       "backend": "numba",
       "threads": 2,
-      "assembly_s": 27.60460930003319,
-      "materialization_s": 0.00589840003522113,
-      "linear_solve_s": 1.902922299981583,
-      "wall_s": 29.61237510002684,
-      "cpu_over_wall": 1.8810758951905049
+      "assembly_s": 22.034435800043866,
+      "materialization_s": 0.006511100044008344,
+      "linear_solve_s": 1.8548642999958247,
+      "wall_s": 23.98641489999136,
+      "cpu_over_wall": 1.8708506538847607
     },
     {
       "backend": "numba",
       "threads": 4,
-      "assembly_s": 17.777579900051933,
-      "materialization_s": 0.0060384999960660934,
-      "linear_solve_s": 2.027764600003138,
-      "wall_s": 19.97275500005344,
-      "cpu_over_wall": 3.4946042746638235
+      "assembly_s": 14.82583230000455,
+      "materialization_s": 0.004855800012592226,
+      "linear_solve_s": 1.8713782000122592,
+      "wall_s": 16.841079899983015,
+      "cpu_over_wall": 3.45787653439366
     },
     {
       "backend": "numba",
       "threads": 8,
-      "assembly_s": 14.494626700005028,
-      "materialization_s": 0.004832100006751716,
-      "linear_solve_s": 1.9178609999944456,
-      "wall_s": 16.623271199990995,
-      "cpu_over_wall": 6.633208570889448
+      "assembly_s": 14.060937100031879,
+      "materialization_s": 0.004917499958537519,
+      "linear_solve_s": 1.8769613999756984,
+      "wall_s": 16.142581599997357,
+      "cpu_over_wall": 6.6110088611859625
     },
     {
       "backend": "numba",
       "threads": 12,
-      "assembly_s": 14.998666800034698,
-      "materialization_s": 0.00409970001783222,
-      "linear_solve_s": 1.8870364000322297,
-      "wall_s": 17.09745549998479,
-      "cpu_over_wall": 9.543635016341769
+      "assembly_s": 15.124008500017226,
+      "materialization_s": 0.004561200039461255,
+      "linear_solve_s": 1.853765800013207,
+      "wall_s": 17.248161300027277,
+      "cpu_over_wall": 9.096078258483812
     },
     {
       "backend": "opencl",
       "threads": 1,
-      "assembly_s": 2.1779921000706963,
-      "materialization_s": 0.009381200012285262,
-      "linear_solve_s": 1.9040874000056647,
-      "wall_s": 4.130134400038514,
-      "cpu_over_wall": 6.022806424838871
+      "assembly_s": 2.2376486999564804,
+      "materialization_s": 0.008689099980983883,
+      "linear_solve_s": 1.8908775000018068,
+      "wall_s": 4.180917100049555,
+      "cpu_over_wall": 5.934702699488087
     },
     {
       "backend": "opencl",
       "threads": 2,
-      "assembly_s": 2.201355900033377,
-      "materialization_s": 0.0067699000355787575,
-      "linear_solve_s": 1.9328065000008792,
-      "wall_s": 4.180793299979996,
-      "cpu_over_wall": 5.990938370504909
+      "assembly_s": 2.2215716000064276,
+      "materialization_s": 0.006589700002223253,
+      "linear_solve_s": 1.8749995999969542,
+      "wall_s": 4.145860699994955,
+      "cpu_over_wall": 5.999960394238588
     },
     {
       "backend": "opencl",
       "threads": 4,
-      "assembly_s": 2.240234600030817,
-      "materialization_s": 0.0063439999939873815,
-      "linear_solve_s": 1.8863480999716558,
-      "wall_s": 4.17267980001634,
-      "cpu_over_wall": 6.092457657522739
+      "assembly_s": 2.209185100044124,
+      "materialization_s": 0.0050391999538987875,
+      "linear_solve_s": 1.8590729999705218,
+      "wall_s": 4.116111499955878,
+      "cpu_over_wall": 6.092673874424642
     },
     {
       "backend": "opencl",
       "threads": 8,
-      "assembly_s": 2.193880300037563,
-      "materialization_s": 0.005407700024079531,
-      "linear_solve_s": 1.9254635000252165,
-      "wall_s": 4.171336000028532,
-      "cpu_over_wall": 5.918367640446882
+      "assembly_s": 2.2462821999797598,
+      "materialization_s": 0.005018400028347969,
+      "linear_solve_s": 1.7582112000091001,
+      "wall_s": 4.054576199967414,
+      "cpu_over_wall": 6.050262417117023
     },
     {
       "backend": "opencl",
       "threads": 12,
-      "assembly_s": 2.199415799928829,
-      "materialization_s": 0.0050273999804630876,
-      "linear_solve_s": 1.8935372999985702,
-      "wall_s": 4.141781600017566,
-      "cpu_over_wall": 6.062457518255792
+      "assembly_s": 2.189149299985729,
+      "materialization_s": 0.0050734999822452664,
+      "linear_solve_s": 1.8715930000180379,
+      "wall_s": 4.105539799958933,
+      "cpu_over_wall": 6.077915746974272
     }
   ]
 }

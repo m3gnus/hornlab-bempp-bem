@@ -311,28 +311,28 @@ Double precision:
 
 | P1 DOF | Numba   | OpenCL  | ratio |
 | ------ | ------- | ------- | ----- |
-| 1,338  | 2.21 s  | 0.58 s  | 3.8x  |
-| 2,912  | 15.36 s | 2.15 s  | 7.1x  |
-| 4,992  | 67.90 s | 5.85 s  | 11.6x |
+| 1,338  | 2.07 s  | 0.58 s  | 3.6x  |
+| 2,912  | 15.24 s | 2.25 s  | 6.8x  |
+| 4,992  | 66.51 s | 5.83 s  | 11.4x |
 
 Single precision:
 
 | P1 DOF | Numba   | OpenCL  | ratio |
 | ------ | ------- | ------- | ----- |
-| 1,338  | 2.40 s  | 0.38 s  | 6.3x  |
-| 2,912  | 12.27 s | 1.23 s  | 10.0x |
-| 4,992  | 58.07 s | 3.08 s  | 18.9x |
+| 1,338  | 2.23 s  | 0.37 s  | 6.0x  |
+| 2,912  | 11.95 s | 1.24 s  | 9.6x  |
+| 4,992  | 57.03 s | 3.11 s  | 18.3x |
 
 The gap widens with mesh size and is wider in single precision, because OpenCL
 compiles a `vec8` kernel for fp32 against `vec4` for fp64 while Numba gains far
 less from the narrower type. Post-solve field evaluation shows the same
-asymmetry more sharply still: 0.416 s against 0.009 s at 4,992 DOF.
+asymmetry more sharply still: 0.394 s against 0.009 s at 4,992 DOF.
 
 Two figures are worth keeping in view when reading those ratios. The linear
-solve is unaffected — 8.05 s (Numba) against 8.36 s (OpenCL) at 4,992 DOF,
+solve is unaffected — 8.32 s (Numba) against 8.31 s (OpenCL) at 4,992 DOF,
 because it is the same SciPy LU either way — so the ratios describe assembly,
 not end-to-end solve time. And OpenCL wins while using *fewer* cores, not more:
-CPU-time over wall-time was 9.4 for Numba against 5.1 for OpenCL at 4,992 DOF.
+CPU-time over wall-time was 9.5 for Numba against 5.1 for OpenCL at 4,992 DOF.
 That is a per-core efficiency difference, so throwing threads at the Numba path
 does not close it.
 

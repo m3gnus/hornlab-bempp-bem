@@ -100,7 +100,33 @@ def _mesh_at(factor: float, geo: Path):
     used = np.unique(triangles)
     remap = np.full(coords.shape[0], -1, dtype=np.int64)
     remap[used] = np.arange(used.size)
-    return coords[used], remap[triangles]
+    return _merge_coincident(coords[used], remap[triangles])
+
+
+def _merge_coincident(vertices, triangles, decimals: int = 9):
+    """Weld vertices that share a position, and renumber the triangles.
+
+    gmsh emits one node per (surface, position) pair, so every seam between the
+    20 surfaces its classification produces carries duplicated nodes -- 83 of
+    them at the smallest rung here, 203 at the largest. That is not cosmetic:
+    the two engines disagree about what to do with it. hornlab-bempp-bem welds
+    them on load (``merge_tol=1e-9``) and reports 1,338 vertices; BEAT does not
+    and reports 1,421 for the same file. So without this the two engines solve
+    *different discretizations*, and BEAT's is a cracked surface whose P1 space
+    is not continuous across the seams -- which is exactly the kind of thing
+    that looks like an engine disagreement in a comparison table.
+
+    Welding here means the file itself is watertight and every consumer sees
+    the same mesh, rather than each applying its own policy.
+    """
+    keys = np.round(vertices, decimals)
+    _, first_index, inverse = np.unique(
+        keys, axis=0, return_index=True, return_inverse=True)
+    # np.unique sorts; keep the original vertex order so the mesh stays stable.
+    order = np.argsort(first_index)
+    position = np.empty(order.size, dtype=np.int64)
+    position[order] = np.arange(order.size)
+    return vertices[first_index[order]], position[inverse.ravel()][triangles]
 
 
 def _tag(vertices, triangles):
