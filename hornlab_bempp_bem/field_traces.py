@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Literal
 
@@ -12,6 +13,47 @@ from .backends import resolve_fastest_backend
 from .bie import _evaluate_far_field, _operator_kwargs, _setup_function_spaces
 from .config import VECTORIZATION_MODES
 from .mesh import LoadedMesh
+
+logger = logging.getLogger(__name__)
+
+# Reasons already reported by _warn_once_on_backend_fallback.
+_FALLBACK_REPORTED: set[str] = set()
+
+
+def _reset_fallback_warnings() -> None:
+    """Forget which fallback reasons have been reported. For tests."""
+    _FALLBACK_REPORTED.clear()
+
+
+def _warn_once_on_backend_fallback(resolution) -> None:
+    """Say so when field evaluation drops to Numba, once per distinct reason.
+
+    The fallback itself is deliberate: ``resolve_fastest_backend`` keeps
+    interactive re-evaluation working on a machine whose solve ran elsewhere.
+    What it must not be is silent. Numba assembly is several times the OpenCL
+    time on the same machine and the gap widens with mesh size -- see the
+    measured table under "Checking the OpenCL runtime before you rely on it" in
+    the README. Unannounced, a gap that size reads as "this machine is slow"
+    rather than "the OpenCL runtime is missing", which is the wrong thing to go
+    looking for.
+
+    Once per reason, not once per call: field evaluation is re-invoked
+    interactively, and a warning on every call would train the reader to
+    ignore it.
+    """
+    if not resolution.fallback_used:
+        return
+    reason = resolution.reason or "no reason given"
+    if reason in _FALLBACK_REPORTED:
+        return
+    _FALLBACK_REPORTED.add(reason)
+    logger.warning(
+        "Field evaluation fell back to the Numba assembly backend, which is "
+        "several times slower than OpenCL on the same machine and widens with "
+        "mesh size. Install a CPU OpenCL runtime (pocl on Linux, the Intel CPU "
+        "Runtime for OpenCL Applications on Windows) to avoid it. Reason: %s",
+        reason,
+    )
 
 
 def _trace_grid(mesh_or_grid):
@@ -186,6 +228,7 @@ def evaluate_exterior_from_traces(
         opencl_device=opencl_device,
         required_precision=precision,
     )
+    _warn_once_on_backend_fallback(resolution)
     op_kwargs = _operator_kwargs(
         resolution.effective_backend,
         precision,

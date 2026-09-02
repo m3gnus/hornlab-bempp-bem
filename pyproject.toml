@@ -13,7 +13,14 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.21",
-    "bempp-cl>=0.4,<0.5",
+    # Floor is the version this package is actually exercised against. Upstream
+    # bempp-cl runs no Windows or macOS CI, so "it installed" is not evidence it
+    # solves -- scripts/windows_smoke.py is what establishes that, and 0.4.2 is
+    # what it has been run against. Note 0.4.2 imports as `bempp_cl`, not
+    # `bempp`. Keep the <0.5 cap: this package reaches into bempp-cl internals
+    # (see _opencl_program_cache and _opencl_singular_workgroup), so a minor
+    # bump needs the smoke test re-run rather than assumed.
+    "bempp-cl>=0.4.2,<0.5",
     "meshio>=5.0",
     # bie.py calls scipy.linalg directly; until now scipy only arrived
     # transitively via bempp-cl.
@@ -23,6 +30,16 @@ dependencies = [
 [project.optional-dependencies]
 opencl = ["pyopencl"]
 dev = ["pytest", "pyopencl"]
+
+# State the package explicitly rather than letting setuptools guess. Flat-layout
+# auto-discovery fails the moment a second top-level directory appears that is
+# not on setuptools' conventional exclude list: adding runs/ for benchmark
+# artefacts broke `pip install -e .` on every platform with "Multiple top-level
+# packages discovered in a flat-layout: ['runs', 'hornlab_bempp_bem']", while
+# scripts/ had been harmless because setuptools excludes that name by default.
+# Naming the package makes any future top-level directory a non-event.
+[tool.setuptools]
+packages = ["hornlab_bempp_bem"]
 
 [tool.pytest.ini_options]
 markers = [
