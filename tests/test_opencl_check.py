@@ -75,6 +75,109 @@ def test_a_present_but_broken_runtime_is_reported_at_the_assembly_stage(monkeypa
     assert "clBuildProgram" in (result.detail or "")
 
 
+def test_a_runtime_that_returns_zeros_is_reported_at_the_assembly_stage(monkeypatch):
+    """The failure that actually happens, which is silent rather than loud.
+
+    The test above models a broken runtime as one that raises. Real ones do
+    not. bempp-cl never reads back the build status of the kernel it enqueues,
+    so when the build fails the output buffer comes back exactly as allocated:
+    all zeros, finite, correctly shaped, and returned faster than a working
+    backend could have produced it.
+
+    Measured on PoCL 7.0.0 on Windows on 2026-09-02, whose kernel object
+    compiles but cannot be linked without an MSVC toolchain. Before this check
+    existed, check_opencl reported ``ok`` on that machine and the smoke test's
+    solve arm "passed" at 7.5x numba, with every entry of the operator zero.
+    """
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.configure_opencl",
+        lambda device_type="cpu": "Runtime That Builds Nothing",
+    )
+
+    result = check_opencl("cpu")
+    if not result.ok and result.stage == "pyopencl":
+        pytest.skip(f"PyOpenCL is unavailable here: {result.detail}")
+
+    import numpy as np
+
+    from bempp_cl.api.operators.boundary import helmholtz
+
+    real_single_layer = helmholtz.single_layer
+
+    class _ZeroWeakForm:
+        def __init__(self, n):
+            self._n = n
+
+        def to_dense(self):
+            return np.zeros((self._n, self._n), dtype=np.complex128)
+
+    class _ZeroOperator:
+        def __init__(self, n):
+            self._n = n
+
+        def weak_form(self):
+            return _ZeroWeakForm(self._n)
+
+    def silently_zero(domain, range_, dual_to_range, *args, **kwargs):
+        return _ZeroOperator(domain.global_dof_count)
+
+    monkeypatch.setattr(helmholtz, "single_layer", silently_zero)
+    assert helmholtz.single_layer is not real_single_layer
+
+    result = check_opencl("cpu")
+    assert result.ok is False
+    assert result.stage == "assembly"
+    assert result.device_name == "Runtime That Builds Nothing"
+    assert "entirely zero" in (result.detail or "")
+
+
+def test_a_gap_in_the_singular_assembly_is_reported_at_the_assembly_stage(monkeypatch):
+    """Non-zero overall, but a zero where the operator cannot have one.
+
+    Weaker than the all-zero case and worth catching separately: it is what a
+    partially-built kernel looks like, and the single-layer diagonal carries
+    the strongly singular self terms, so a zero there is never physical.
+    """
+    monkeypatch.setattr(
+        "hornlab_bempp_bem.device.configure_opencl",
+        lambda device_type="cpu": "Runtime With A Gap",
+    )
+
+    result = check_opencl("cpu")
+    if not result.ok and result.stage == "pyopencl":
+        pytest.skip(f"PyOpenCL is unavailable here: {result.detail}")
+
+    import numpy as np
+
+    from bempp_cl.api.operators.boundary import helmholtz
+
+    class _HoleyWeakForm:
+        def __init__(self, n):
+            self._n = n
+
+        def to_dense(self):
+            matrix = np.full((self._n, self._n), 0.5 + 0.5j, dtype=np.complex128)
+            np.fill_diagonal(matrix, 0.0)
+            return matrix
+
+    class _HoleyOperator:
+        def __init__(self, n):
+            self._n = n
+
+        def weak_form(self):
+            return _HoleyWeakForm(self._n)
+
+    monkeypatch.setattr(
+        helmholtz, "single_layer",
+        lambda domain, *a, **k: _HoleyOperator(domain.global_dof_count),
+    )
+
+    result = check_opencl("cpu")
+    assert result.ok is False
+    assert result.stage == "assembly"
+    assert "diagonal" in (result.detail or "")
+
+
 def test_require_opencl_raises_with_the_stage_in_the_message(monkeypatch):
     monkeypatch.setattr(
         "hornlab_bempp_bem.device.configure_opencl",

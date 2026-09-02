@@ -190,6 +190,32 @@ def _phases(entry: dict) -> dict:
     }
 
 
+def _fingerprint(result) -> dict:
+    """Numbers that change when a backend stops solving the same problem.
+
+    A timing column alone cannot tell "fast" from "did nothing": a runtime that
+    fails to build its kernel and returns a zero buffer is the fastest arm in
+    any assembly benchmark. Both quantities below are zero in exactly that case
+    and non-zero for any real solve, so a glance at the column is enough.
+    """
+    if result is None:
+        return {"on_axis_spl_db": None, "surface_pressure_l2": None}
+    fingerprint: dict = {"on_axis_spl_db": None, "surface_pressure_l2": None}
+    try:
+        spl = np.asarray(result.spl_db)
+        # Angle 0 of the horizontal plane is on axis; the ladder sweeps
+        # 0..180 degrees, so it is the first column.
+        fingerprint["on_axis_spl_db"] = float(np.ravel(spl)[0])
+    except Exception:
+        pass
+    try:
+        traces = np.asarray(result.surface_pressure_complex)
+        fingerprint["surface_pressure_l2"] = float(np.linalg.norm(traces))
+    except Exception:
+        pass
+    return fingerprint
+
+
 def measure(mesh_path: Path, backend: str, precision: str) -> dict:
     import hornlab_bempp_bem as bempp_bem
     from hornlab_bempp_bem.mesh import load_mesh
@@ -207,6 +233,7 @@ def measure(mesh_path: Path, backend: str, precision: str) -> dict:
     frequencies = np.array([FREQUENCY_HZ], dtype=np.float64)
 
     runs = []
+    result = None
     for label in ("cold", "warm"):
         wall0, cpu0 = time.perf_counter(), time.process_time()
         result = bempp_bem.solve_frequencies(mesh, frequencies, config)
@@ -242,8 +269,11 @@ def measure(mesh_path: Path, backend: str, precision: str) -> dict:
         "runs": runs,
         "peak_rss_bytes": peak_rss_bytes(),
         # A fingerprint of the answer, so a "faster" configuration that quietly
-        # stopped solving the same problem is visible.
-        "on_axis_spl_db": None,
+        # stopped solving the same problem is visible. This was declared and
+        # left as None in the first B0 run, which is how PoCL got measured at
+        # 7.5x numba on 2026-09-02 while returning an all-zero matrix: every
+        # timing looked plausible and nothing in the record disagreed.
+        **_fingerprint(result),
     }
 
 

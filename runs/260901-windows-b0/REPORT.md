@@ -62,6 +62,13 @@ metal with AVX-512.
 | 2,912  | 11.95 s | 1.24 s  | 9.6x  |
 | 4,992  | 57.03 s | 3.11 s  | 18.3x |
 
+A third runtime, PoCL 7.0.0, was measured against this same ladder on
+2026-09-02 and is reported in `runs/260902-windows-pocl`, which carries the
+combined table. Its column is not a result: PoCL cannot link a kernel on
+Windows without an MSVC toolchain, so it returns all-zero matrices, and its
+"assembly" times are flat at 1.1-1.4 s across the whole ladder. It is kept
+because that is what a broken runtime looks like from inside this benchmark.
+
 The gap widens with mesh size in both precisions, and is consistently wider in
 fp32 — OpenCL compiles a `vec8` kernel for single precision against `vec4` for
 double, so it gains from the narrower type where Numba gains much less.
