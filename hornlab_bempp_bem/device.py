@@ -215,6 +215,19 @@ def check_opencl(device_type: str = "cpu") -> OpenCLCheck:
     first real assembly would have paid anyway, so run it at startup and it is
     not extra work, it is the same work moved somewhere it can be reported.
 
+    Assembling is necessary but not sufficient, because the interesting failure
+    is silent. bempp-cl does not check the build status of the kernel it
+    enqueues, so a runtime that fails to compile returns the output buffer
+    untouched -- all zeros, finite, correctly shaped, and fast. This therefore
+    also checks that the operator is not zero and has no zero on its diagonal,
+    which is what separates "assembled" from "returned the buffer it was
+    given".
+
+    What it still cannot catch is a runtime that computes non-zero but wrong
+    values. Nothing self-contained can: that needs a second backend to compare
+    against, which is what ``scripts/windows_smoke.py`` does and why that
+    script exists alongside this function rather than being replaced by it.
+
     ``stage`` says how far it got: ``pyopencl`` (module missing), ``device``
     (no usable device), ``assembly`` (device present, kernel or assembly
     failed), or ``ok``.
@@ -249,6 +262,29 @@ def check_opencl(device_type: str = "cpu") -> OpenCLCheck:
             raise OpenCLError(f"unexpected operator shape {matrix.shape}")
         if not np.all(np.isfinite(matrix.view(np.float64))):
             raise OpenCLError("assembled operator contains non-finite entries")
+        # A runtime that cannot build its kernel does not raise: bempp-cl
+        # enqueues the kernel, the build fails, and the output buffer is
+        # returned exactly as it was allocated -- all zeros. Zeros are finite
+        # and correctly shaped, so shape and finiteness alone report such a
+        # machine as healthy. Measured on PoCL 7.0.0 on Windows 2026-09-02,
+        # where the kernel object compiles but cannot be linked without an
+        # MSVC toolchain: check_opencl said "ok", the solve was 7.5x "faster"
+        # than numba, and every entry of the operator was zero.
+        if not np.any(matrix):
+            raise OpenCLError(
+                "assembled operator is entirely zero, so the OpenCL kernel did "
+                "not run. The device initialized but its kernel build failed; "
+                "the runtime usually reports that on stderr rather than through "
+                "the API"
+            )
+        # The single-layer operator's self-interaction terms are strongly
+        # singular, so a zero on the diagonal means part of the assembly was
+        # skipped even when the matrix is not zero everywhere.
+        if not np.all(np.abs(np.diagonal(matrix)) > 0.0):
+            raise OpenCLError(
+                "assembled operator has zeros on its diagonal, so part of the "
+                "singular assembly did not run"
+            )
     except Exception as exc:
         return OpenCLCheck(False, "assembly", device_name, f"{type(exc).__name__}: {exc}")
 
