@@ -1,0 +1,114 @@
+name: CI
+
+# This package is pinned by Waveguide Generator through pins.json, so a break
+# here reaches the consumer with nothing in between. What runs here is the
+# whole test suite on all three hosted platforms, plus -- on Linux only -- a
+# real OpenCL device, because the OpenCL workarounds in this package are the
+# part a Numba-only run cannot see.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # The suite is 1-2 minutes on every platform it has been measured on. A cap
+    # well above that turns a hang into a failure inside the hour rather than
+    # letting it sit at GitHub's 6-hour default -- Waveguide Generator lost
+    # multi-hour Windows jobs to exactly that before it capped its own.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # Two unrelated Linux-only needs, one apt transaction:
+      #
+      # pocl is the only OpenCL runtime a hosted runner can get. No GitHub
+      # image registers an ICD, so without it every OpenCL test -- the program
+      # cache, the singular-workgroup tuning, the Robin double-precision
+      # promotion, i.e. all of this package's bempp-cl workarounds -- skips
+      # itself on a device probe and the job proves nothing about them. With
+      # pocl the Linux leg assembles against a real device: 392 passed / 6
+      # skipped, against 384 / 14 without it. macOS and Windows have no
+      # equivalent CPU OpenCL runtime, so those legs exercise the Numba path
+      # and the OpenCL fallback logic instead, which is also worth having.
+      #
+      # libglu1-mesa is for the gmsh wheel installed below: gmsh links against
+      # the system GL/GLU stack and the Ubuntu image does not carry libGLU, so
+      # loading it fails without this. Same fix as hornlab-waveguide-mesher.
+      - name: Install the Linux-only system packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pocl-opencl-icd libglu1-mesa
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      # bempp-cl's shape helpers shell out to a gmsh *binary*, and
+      # tests/test_opencl_program_cache_integration.py builds its sphere with
+      # bempp_cl.api.shapes.sphere(). That suite skips on a device probe when
+      # there is no OpenCL device, which hides the missing binary completely --
+      # installing pocl above is what surfaces it, as four collection errors
+      # reading "Gmsh is not found. Cannot generate mesh". It is installed on
+      # every OS rather than only Linux so that a runner image which turns out
+      # to expose an OpenCL device runs those tests instead of erroring on
+      # them. The package itself never imports gmsh; this is test-only.
+      - name: Install the gmsh binary bempp-cl's shape helpers shell out to
+        run: python -m pip install gmsh
+
+      - name: Tests
+        env:
+          # The README's canonical test command sets this. Numba's default
+          # cache location sits inside the installed package, which is not
+          # writable everywhere; pointing it at the workspace keeps CI running
+          # the same command a developer runs locally.
+          NUMBA_CACHE_DIR: ${{ github.workspace }}/.numba_cache
+        # -v, not -q: a sibling repository has had a runner die mid-run with no
+        # summary at all, and the only way to name the test that took the
+        # process down is to have pytest print each one as it starts.
+        run: python -m pytest tests/ -v
+
+      # tests/test_reference_asro68.py compares against an external reference
+      # mesh and a validation-artifact directory that are not in this
+      # repository and are not on the runner. With HORNLAB_ASRO68_MESH and
+      # HORNLAB_VALIDATION_ARTIFACTS unset it skips *silently*, so a deleted
+      # file and a skipped file are indistinguishable in a green job. Assert it
+      # still collects; that check is what a silent skip cannot fake.
+      - name: External validation suite is still present (it skips here by design)
+        # The echo goes first on purpose: on Windows the step's exit status is
+        # the *last* command's, so a trailing echo would swallow pytest's
+        # exit 4 and the assertion would quietly stop asserting.
+        run: |
+          echo "Collected, not executed: set HORNLAB_ASRO68_MESH and HORNLAB_VALIDATION_ARTIFACTS to run it."
+          python -m pytest tests/test_reference_asro68.py --collect-only -q
+
+      # The coupled infinite-baffle solver's cross-package gate compares
+      # absolute field against hornlab-metal-bem's portable CircSym path.
+      # hornlab-metal-bem is a sibling repository with no PyPI release, so the
+      # test importorskips here while the rest of that module runs -- the same
+      # silent-skip hazard, narrowed to one node id so a rename or a deletion
+      # fails collection with exit 4.
+      - name: Cross-package infinite-baffle gate is still present
+        run: python -m pytest "tests/test_infinite_baffle.py::test_bempp_coupled_ib_matches_portable_circsym_absolute_field" --collect-only -q
+
+      # On macOS and Windows these skip on the device probe, for the same
+      # reason and with the same blind spot. On Linux pocl makes them run, so
+      # there the step is a tautology and costs a second.
+      - name: OpenCL integration suite is still present
+        run: python -m pytest tests/test_opencl_program_cache_integration.py --collect-only -q

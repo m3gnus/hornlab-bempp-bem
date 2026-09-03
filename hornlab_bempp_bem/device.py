@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 
 class OpenCLError(RuntimeError):
     pass
@@ -127,6 +129,175 @@ def configure_opencl(device_type: str = "cpu") -> str:
     return _active_device_name
 
 
+def _opencl_device_supports_fp64(device: object) -> bool:
+    """Return whether an OpenCL device advertises double-precision support."""
+    try:
+        if int(getattr(device, "double_fp_config", 0)) != 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    extensions = set(str(getattr(device, "extensions", "")).split())
+    return bool({"cl_khr_fp64", "cl_amd_fp64"} & extensions)
+
+
+def opencl_devices_without_fp64(device_type: str = "cpu") -> tuple[str, ...]:
+    """Name configured devices that Bempp needs but that lack fp64 support.
+
+    Bempp's GPU boundary path still uses its CPU OpenCL context for dense
+    singular assembly, so both devices must support fp64 in GPU mode.
+    """
+    normalized = str(device_type or "cpu").strip().lower()
+    configure_opencl(normalized)
+
+    import bempp_cl.core.opencl_kernels as opencl_kernels
+
+    if normalized == "cpu":
+        devices = (opencl_kernels.default_cpu_device(),)
+    else:
+        devices = (
+            opencl_kernels.default_gpu_device(),
+            opencl_kernels.default_cpu_device(),
+        )
+    return tuple(
+        str(getattr(device, "name", None) or "unnamed OpenCL device")
+        for device in devices
+        if not _opencl_device_supports_fp64(device)
+    )
+
+
 # Compatibility with the previous ``lru_cache``-decorated implementation, which
 # callers and tests reset through this name.
 configure_opencl.cache_clear = reset_opencl_device
+
+
+@dataclass(frozen=True)
+class OpenCLCheck:
+    """Outcome of :func:`check_opencl`."""
+
+    ok: bool
+    stage: str
+    device_name: str | None = None
+    detail: str | None = None
+
+    def describe(self) -> str:
+        """One line suitable for a log, a banner, or a smoke test."""
+        if self.ok:
+            return f"OpenCL OK: assembled on {self.device_name!r}"
+        return f"OpenCL UNAVAILABLE at stage {self.stage!r}: {self.detail}"
+
+
+def check_opencl(device_type: str = "cpu") -> OpenCLCheck:
+    """Verify the OpenCL path by *using* it, and report where it breaks.
+
+    Two cheaper checks get proposed for this job and both are weaker:
+
+    ``pyopencl.get_platforms()`` finding a CPU-type device proves only that an
+    ICD is registered. It says nothing about whether bempp-cl chose it, and
+    nothing about whether a kernel will build.
+
+    Reading back ``bempp_cl.api.DEFAULT_DEVICE_INTERFACE`` after import is
+    better -- it is the actual decision variable, set at import by a probe in
+    ``bempp_cl/api/__init__.py`` that looks for a CPU-type device and falls
+    back to ``"numba"`` when it finds none. But it is still only a record of
+    that probe. It is skipped entirely on Darwin, it can be reassigned by any
+    caller afterwards, and this package overrides it per-operator anyway by
+    passing ``device_interface`` explicitly.
+
+    Neither survives the failure that actually bites: a runtime that is present
+    and enumerable but cannot compile. That is not hypothetical here -- see
+    ``_opencl_program_cache.enable_opencl_build_workarounds``, which exists
+    because an install path containing a space breaks the kernel build on a
+    machine whose device enumerates perfectly.
+
+    So this builds a real kernel and assembles a real operator on a 32-element
+    sphere. It is the only version that fails when the runtime is broken rather
+    than absent, and the cost is a one-off: it pays the same kernel compile the
+    first real assembly would have paid anyway, so run it at startup and it is
+    not extra work, it is the same work moved somewhere it can be reported.
+
+    Assembling is necessary but not sufficient, because the interesting failure
+    is silent. bempp-cl does not check the build status of the kernel it
+    enqueues, so a runtime that fails to compile returns the output buffer
+    untouched -- all zeros, finite, correctly shaped, and fast. This therefore
+    also checks that the operator is not zero and has no zero on its diagonal,
+    which is what separates "assembled" from "returned the buffer it was
+    given".
+
+    What it still cannot catch is a runtime that computes non-zero but wrong
+    values. Nothing self-contained can: that needs a second backend to compare
+    against, which is what ``scripts/windows_smoke.py`` does and why that
+    script exists alongside this function rather than being replaced by it.
+
+    ``stage`` says how far it got: ``pyopencl`` (module missing), ``device``
+    (no usable device), ``assembly`` (device present, kernel or assembly
+    failed), or ``ok``.
+    """
+    try:
+        import pyopencl  # noqa: F401
+    except Exception as exc:
+        return OpenCLCheck(False, "pyopencl", None, f"PyOpenCL is unavailable: {exc}")
+
+    try:
+        # Runtimes pad the device name; it ends up in logs and banners.
+        device_name = configure_opencl(device_type).strip()
+    except Exception as exc:
+        return OpenCLCheck(False, "device", None, str(exc))
+
+    try:
+        import numpy as np
+        import bempp_cl.api as bempp_api
+        from bempp_cl.api.operators.boundary import helmholtz
+
+        grid = bempp_api.shapes.regular_sphere(1)
+        space = bempp_api.function_space(grid, "P", 1)
+        # to_dense(), not the ``.A`` property: bempp-cl 0.4.2 deprecates ``.A``
+        # and ``.A`` is only a warning wrapper around this same call.
+        matrix = np.asarray(
+            helmholtz.single_layer(
+                space, space, space, 1.0,
+                assembler="dense", device_interface="opencl",
+            ).weak_form().to_dense()
+        )
+        if matrix.shape != (space.global_dof_count, space.global_dof_count):
+            raise OpenCLError(f"unexpected operator shape {matrix.shape}")
+        if not np.all(np.isfinite(matrix.view(np.float64))):
+            raise OpenCLError("assembled operator contains non-finite entries")
+        # A runtime that cannot build its kernel does not raise: bempp-cl
+        # enqueues the kernel, the build fails, and the output buffer is
+        # returned exactly as it was allocated -- all zeros. Zeros are finite
+        # and correctly shaped, so shape and finiteness alone report such a
+        # machine as healthy. Measured on PoCL 7.0.0 on Windows 2026-09-02,
+        # where the kernel object compiles but cannot be linked without an
+        # MSVC toolchain: check_opencl said "ok", the solve was 7.5x "faster"
+        # than numba, and every entry of the operator was zero.
+        if not np.any(matrix):
+            raise OpenCLError(
+                "assembled operator is entirely zero, so the OpenCL kernel did "
+                "not run. The device initialized but its kernel build failed; "
+                "the runtime usually reports that on stderr rather than through "
+                "the API"
+            )
+        # The single-layer operator's self-interaction terms are strongly
+        # singular, so a zero on the diagonal means part of the assembly was
+        # skipped even when the matrix is not zero everywhere.
+        if not np.all(np.abs(np.diagonal(matrix)) > 0.0):
+            raise OpenCLError(
+                "assembled operator has zeros on its diagonal, so part of the "
+                "singular assembly did not run"
+            )
+    except Exception as exc:
+        return OpenCLCheck(False, "assembly", device_name, f"{type(exc).__name__}: {exc}")
+
+    return OpenCLCheck(True, "ok", device_name, None)
+
+
+def require_opencl(device_type: str = "cpu") -> OpenCLCheck:
+    """:func:`check_opencl`, but raise ``OpenCLError`` when it is not usable.
+
+    For callers that would rather stop at startup than discover the problem as
+    an unexplained several-fold slowdown partway through a sweep.
+    """
+    result = check_opencl(device_type)
+    if not result.ok:
+        raise OpenCLError(result.describe())
+    return result

@@ -1,0 +1,122 @@
+{
+  "benchmark": "B0 thread scaling",
+  "rung": "L2",
+  "environment": {
+    "platform": "Windows-11-10.0.26100-SP0",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD",
+    "python": "3.13.3",
+    "cpu_count": 12,
+    "bempp_cl": "0.4.2",
+    "numpy": "2.4.6",
+    "scipy": "1.17.1",
+    "numba": "0.66.0",
+    "pyopencl": "2026.1.2",
+    "opencl_devices": [
+      {
+        "platform": "Intel(R) OpenCL",
+        "name": "AMD Ryzen 7 5825U with Radeon Graphics",
+        "type": "ALL | CPU",
+        "max_compute_units": 12,
+        "max_clock_frequency_mhz": 0,
+        "global_mem_bytes": 17174896640
+      }
+    ],
+    "NUMBA_NUM_THREADS": null,
+    "OMP_NUM_THREADS": null,
+    "MKL_NUM_THREADS": null,
+    "OPENBLAS_NUM_THREADS": null
+  },
+  "points": [
+    {
+      "backend": "numba",
+      "threads": 1,
+      "assembly_s": 38.30471070000203,
+      "materialization_s": 0.00757539999904111,
+      "linear_solve_s": 1.865091499988921,
+      "wall_s": 40.2585151999956,
+      "cpu_over_wall": 0.9955192038479447
+    },
+    {
+      "backend": "numba",
+      "threads": 2,
+      "assembly_s": 22.034435800043866,
+      "materialization_s": 0.006511100044008344,
+      "linear_solve_s": 1.8548642999958247,
+      "wall_s": 23.98641489999136,
+      "cpu_over_wall": 1.8708506538847607
+    },
+    {
+      "backend": "numba",
+      "threads": 4,
+      "assembly_s": 14.82583230000455,
+      "materialization_s": 0.004855800012592226,
+      "linear_solve_s": 1.8713782000122592,
+      "wall_s": 16.841079899983015,
+      "cpu_over_wall": 3.45787653439366
+    },
+    {
+      "backend": "numba",
+      "threads": 8,
+      "assembly_s": 14.060937100031879,
+      "materialization_s": 0.004917499958537519,
+      "linear_solve_s": 1.8769613999756984,
+      "wall_s": 16.142581599997357,
+      "cpu_over_wall": 6.6110088611859625
+    },
+    {
+      "backend": "numba",
+      "threads": 12,
+      "assembly_s": 15.124008500017226,
+      "materialization_s": 0.004561200039461255,
+      "linear_solve_s": 1.853765800013207,
+      "wall_s": 17.248161300027277,
+      "cpu_over_wall": 9.096078258483812
+    },
+    {
+      "backend": "opencl",
+      "threads": 1,
+      "assembly_s": 2.2376486999564804,
+      "materialization_s": 0.008689099980983883,
+      "linear_solve_s": 1.8908775000018068,
+      "wall_s": 4.180917100049555,
+      "cpu_over_wall": 5.934702699488087
+    },
+    {
+      "backend": "opencl",
+      "threads": 2,
+      "assembly_s": 2.2215716000064276,
+      "materialization_s": 0.006589700002223253,
+      "linear_solve_s": 1.8749995999969542,
+      "wall_s": 4.145860699994955,
+      "cpu_over_wall": 5.999960394238588
+    },
+    {
+      "backend": "opencl",
+      "threads": 4,
+      "assembly_s": 2.209185100044124,
+      "materialization_s": 0.0050391999538987875,
+      "linear_solve_s": 1.8590729999705218,
+      "wall_s": 4.116111499955878,
+      "cpu_over_wall": 6.092673874424642
+    },
+    {
+      "backend": "opencl",
+      "threads": 8,
+      "assembly_s": 2.2462821999797598,
+      "materialization_s": 0.005018400028347969,
+      "linear_solve_s": 1.7582112000091001,
+      "wall_s": 4.054576199967414,
+      "cpu_over_wall": 6.050262417117023
+    },
+    {
+      "backend": "opencl",
+      "threads": 12,
+      "assembly_s": 2.189149299985729,
+      "materialization_s": 0.0050734999822452664,
+      "linear_solve_s": 1.8715930000180379,
+      "wall_s": 4.105539799958933,
+      "cpu_over_wall": 6.077915746974272
+    }
+  ]
+}

@@ -49,6 +49,14 @@ def _solver_log_entry(fr: FrequencyResult) -> dict:
         "iterations": fr.iterations,
         "converged": fr.converged,
         "timing_s": fr.timing_s,
+        "requested_precision": fr.requested_precision,
+        "effective_precision": fr.effective_precision,
+        "requested_solver": fr.requested_solver,
+        "effective_solver": fr.effective_solver,
+        "requested_backend": fr.requested_backend,
+        "effective_backend": fr.effective_backend,
+        "fallback_used": fr.backend_fallback_used,
+        "reason": fr.backend_fallback_reason,
         "phase_timings": dict(fr.phase_timings),
     }
     if fr.regular_quadrature:
@@ -123,6 +131,50 @@ def _warn_observation_below_ground(
             config.ground_plane, below, axis, lowest,
         )
     return below
+
+
+def _warn_backend_fallback(log_entry: dict) -> None:
+    """Surface an automatic backend fallback alongside its durable metadata."""
+    logger.warning(
+        "Assembly backend %s could not be used; falling back to %s: %s",
+        log_entry["requested_backend"],
+        log_entry["effective_backend"],
+        log_entry["reason"] or "no reason reported",
+    )
+
+
+def _field_operator_kwargs(
+    fr: FrequencyResult,
+    config: SolveConfig,
+    backend: str,
+    cache: dict[tuple[str, str], dict],
+) -> dict:
+    """Return potential-operator kwargs at the solve's effective precision.
+
+    Older/manually constructed ``FrequencyResult`` objects may not carry the
+    precision diagnostic, so retain requested-precision behavior for those
+    compatibility cases. Normal solves always publish ``single`` or ``double``.
+    """
+
+    precision = getattr(fr, "effective_precision", None)
+    if precision not in {"single", "double"}:
+        precision = config.precision
+    effective_backend = getattr(fr, "effective_backend", None)
+    if effective_backend not in {"opencl", "numba"}:
+        effective_backend = backend
+    if effective_backend not in {"opencl", "numba"}:
+        effective_backend = resolve_assembly_backend(
+            config, required_precision=precision,
+        ).effective_backend
+    cache_key = (effective_backend, precision)
+    if cache_key not in cache:
+        cache[cache_key] = _operator_kwargs(
+            effective_backend,
+            precision,
+            config.opencl_device,
+            vectorization_mode=getattr(config, "vectorization_mode", "auto"),
+        )
+    return cache[cache_key]
 
 
 def _build_frequency_grid(config: SolveConfig) -> NDArray[np.float64]:
@@ -216,14 +268,14 @@ def _evaluate_directivity(
     # On-axis index: the angle closest to 0 degrees
     on_axis_idx = int(np.argmin(np.abs(angles_deg)))
 
-    backend = resolve_assembly_backend(config).effective_backend
-    op_kwargs = _operator_kwargs(
-        backend, config.precision, config.opencl_device,
-        vectorization_mode=getattr(config, "vectorization_mode", "auto"),
-    )
+    backend = config.assembly_backend
+    op_kwargs_by_precision: dict[tuple[str, str], dict] = {}
 
     for fi, fr in enumerate(freq_results):
         k_real = 2.0 * np.pi * fr.frequency_hz / SPEED_OF_SOUND
+        op_kwargs = _field_operator_kwargs(
+            fr, config, backend, op_kwargs_by_precision,
+        )
 
         field_pressure = (
             fr.field_pressure_on_surface
@@ -329,6 +381,7 @@ def run_sweep_serial(
         )
     freq_results: list[FrequencyResult] = []
     surface_pavg: dict[int, list[complex]] = {tag: [] for tag in source_tags}
+    backend_fallback_warned = False
 
     # Pre-compute op_kwargs for per-frequency far-field evaluation
     # (only used when on_frequency_result is set)
@@ -337,11 +390,8 @@ def run_sweep_serial(
     callback_spl_rows: list[NDArray[np.float64]] = []
     callback_sphere_rows: list[NDArray[np.complex128]] = []
     if has_callback:
-        _backend = resolve_assembly_backend(config).effective_backend
-        _ff_op_kwargs = _operator_kwargs(
-            _backend, config.precision, config.opencl_device,
-            vectorization_mode=getattr(config, "vectorization_mode", "auto"),
-        )
+        _backend = config.assembly_backend
+        _ff_op_kwargs_by_precision: dict[tuple[str, str], dict] = {}
         on_axis_idx = int(np.argmin(np.abs(angles_deg)))
 
     for i, freq in enumerate(frequencies):
@@ -367,10 +417,16 @@ def run_sweep_serial(
 
         log_entry = _solver_log_entry(fr)
         log_entry["impedance"] = fr.impedance
+        if log_entry["fallback_used"] and not backend_fallback_warned:
+            _warn_backend_fallback(log_entry)
+            backend_fallback_warned = True
 
         # When the callback is set, evaluate per-frequency directivity
         # so the caller can act on partial results as they stream in.
         if has_callback:
+            _ff_op_kwargs = _field_operator_kwargs(
+                fr, config, _backend, _ff_op_kwargs_by_precision,
+            )
             k_real = 2.0 * np.pi * fr.frequency_hz / SPEED_OF_SOUND
             field_pressure = (
                 fr.field_pressure_on_surface
@@ -558,6 +614,7 @@ def run_sweep_parallel(
     surface_pressure_traces_all = None
     surface_neumann_traces_all = None
     solver_log: list[dict] = [{}] * len(frequencies)
+    backend_fallback_warned = False
 
     import multiprocessing as mp
     ctx = mp.get_context("spawn")
@@ -614,8 +671,14 @@ def run_sweep_parallel(
             while pending:
                 done, pending = wait(pending, timeout=0.2)
                 drain_progress()
-                for fut in done:
-                    idx = futures[fut]
+                # Drain ``done`` rather than iterating it: a completed Future
+                # keeps its payload in ``_result``, so a set that still holds
+                # every future of this batch pins every chunk in it. Popping
+                # here and popping ``futures`` below leaves no reference once
+                # the chunk has been merged.
+                while done:
+                    fut = done.pop()
+                    idx = futures.pop(fut)
                     worker_result = fut.result()
                     if config.return_surface_traces:
                         (
@@ -653,6 +716,12 @@ def run_sweep_parallel(
                         spl_all[global_i] = chunk_spl[local_i]
                         impedance_all[global_i] = chunk_imp[local_i]
                         solver_log[global_i] = chunk_log[local_i]
+                        if (
+                            chunk_log[local_i].get("fallback_used", False)
+                            and not backend_fallback_warned
+                        ):
+                            _warn_backend_fallback(chunk_log[local_i])
+                            backend_fallback_warned = True
                         for tag in source_tags:
                             surface_pressure_all[tag][global_i] = (
                                 chunk_surface_pressure[tag][local_i]
@@ -674,6 +743,23 @@ def run_sweep_parallel(
                             and chunk_sphere_pressure is not None
                         ):
                             sphere_pressure_all[global_i] = chunk_sphere_pressure[local_i]
+                    # This chunk is now inside the preallocated full-sweep
+                    # arrays, so drop every remaining reference to its own copy.
+                    #
+                    # ``futures`` used to hold every chunk for the whole merge,
+                    # and a completed ``Future`` keeps its payload alive in
+                    # ``_result``. With ``return_surface_traces`` that payload is
+                    # the chunk's complex128 pressure and Neumann traces, so
+                    # every chunk stayed resident alongside the full-sweep arrays
+                    # it had already been copied into: peak was about twice
+                    # ``estimate_field_trace_retention_bytes``, which counts one
+                    # copy. The retention cap could therefore admit a solve that
+                    # then needed double the budget it was checked against.
+                    del fut
+                    worker_result = None
+                    chunk_pressure = chunk_spl = chunk_imp = chunk_log = None
+                    chunk_surface_pressure = chunk_sphere_pressure = None
+                    chunk_pressure_traces = chunk_neumann_traces = None
                     logger.info(
                         "Completed chunk: %d frequencies", len(idx),
                     )
@@ -825,11 +911,8 @@ def _worker_solve_chunk_inner(
     # On-axis index: the angle closest to 0 degrees
     on_axis_idx = int(np.argmin(np.abs(angles_deg)))
 
-    backend = resolve_assembly_backend(config).effective_backend
-    op_kwargs = _operator_kwargs(
-        backend, config.precision, config.opencl_device,
-        vectorization_mode=getattr(config, "vectorization_mode", "auto"),
-    )
+    backend = config.assembly_backend
+    op_kwargs_by_precision: dict[tuple[str, str], dict] = {}
 
     for i, freq in enumerate(frequencies):
         fr = solve_single_frequency(
@@ -840,6 +923,9 @@ def _worker_solve_chunk_inner(
             axial_element_scale=axial_element_scale,
             closed_mesh_validated=True,
             symmetry_context=symmetry_context,
+        )
+        op_kwargs = _field_operator_kwargs(
+            fr, config, backend, op_kwargs_by_precision,
         )
         impedance[i] = fr.impedance
         pavg = compute_surface_pressure_avg(

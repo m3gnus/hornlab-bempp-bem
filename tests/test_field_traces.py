@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 
 import numpy as np
 import pytest
@@ -297,3 +298,75 @@ def test_native_symmetry_traces_use_reduced_dof_order_and_round_trip():
         _evaluate_result(mesh, result, symmetry_plane="yz"),
         result.pressure_complex,
     )
+
+
+def test_backend_fallback_to_numba_is_reported_once_per_reason(caplog):
+    """A silent drop to Numba is the expensive failure mode, so it must speak.
+
+    ``resolve_fastest_backend`` falls back on purpose so that interactive
+    re-evaluation keeps working on a machine whose solve ran elsewhere, and the
+    resolution already carried ``fallback_used`` and ``reason`` -- but nothing
+    read them, so a missing OpenCL runtime cost several times the assembly time
+    while looking like an ordinary slow machine.
+
+    Once per distinct reason, though: field evaluation is re-invoked
+    interactively and a per-call warning would just teach the reader to skip it.
+    """
+    from hornlab_bempp_bem.backends import AssemblyBackendResolution
+    from hornlab_bempp_bem.field_traces import (
+        _reset_fallback_warnings,
+        _warn_once_on_backend_fallback,
+    )
+
+    _reset_fallback_warnings()
+    fell_back = AssemblyBackendResolution(
+        requested_backend="auto",
+        effective_backend="numba",
+        fallback_used=True,
+        reason="no OpenCL CPU driver",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="hornlab_bempp_bem.field_traces"):
+        _warn_once_on_backend_fallback(fell_back)
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert "Numba" in message
+        assert "no OpenCL CPU driver" in message
+
+        # Same reason again: still one record.
+        _warn_once_on_backend_fallback(fell_back)
+        assert len(caplog.records) == 1
+
+        # A different reason is a different fact, so it gets its own line.
+        _warn_once_on_backend_fallback(
+            AssemblyBackendResolution(
+                requested_backend="auto",
+                effective_backend="numba",
+                fallback_used=True,
+                reason="OpenCL CPU device failed to initialize",
+            )
+        )
+        assert len(caplog.records) == 2
+
+    _reset_fallback_warnings()
+
+
+def test_no_warning_when_opencl_was_actually_used(caplog):
+    """The warning must not cry wolf on the healthy path."""
+    from hornlab_bempp_bem.backends import AssemblyBackendResolution
+    from hornlab_bempp_bem.field_traces import (
+        _reset_fallback_warnings,
+        _warn_once_on_backend_fallback,
+    )
+
+    _reset_fallback_warnings()
+    with caplog.at_level(logging.WARNING, logger="hornlab_bempp_bem.field_traces"):
+        _warn_once_on_backend_fallback(
+            AssemblyBackendResolution(
+                requested_backend="auto",
+                effective_backend="opencl",
+                fallback_used=False,
+                reason="auto selected an available OpenCL Bempp backend",
+            )
+        )
+    assert caplog.records == []

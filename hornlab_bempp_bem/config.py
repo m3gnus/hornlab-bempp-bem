@@ -243,6 +243,14 @@ class SolveConfig:
     # the BIE and solves once (no iteration); see _assemble_and_solve_impedance.
     impedance_sources: dict[int, complex] = field(default_factory=dict)
 
+    # Coupled flush-mount / infinite-baffle physics. The tagged planar mouth
+    # patch closes the interior BEM domain and is coupled to the exterior
+    # half-space with the Rayleigh aperture operator. This is a physics mode,
+    # not a solver selection: the same mesh contract is also understood by the
+    # Metal backend. A canonical physical group named ``mouth_aperture`` is
+    # detected automatically when a mesh path is loaded.
+    aperture_tag: int | None = None
+
     # Observation
     observation: ObservationConfig = field(default_factory=ObservationConfig)
 
@@ -354,10 +362,22 @@ class SolveConfig:
             raise ValueError(
                 "formulation must be 'standard', 'complex_k', or 'burton_miller'"
             ) from None
+        for field_name in (
+            "slp_dlp_quadrature",
+            "slp_dlp_singular_quadrature",
+            "hyp_adlp_quadrature",
+        ):
+            value = getattr(self, field_name)
+            if not _is_integral_value(value) or value < 1:
+                raise ValueError(f"{field_name} must be a positive integer")
+            setattr(self, field_name, int(value))
         try:
             self.solver = LinearSolver(self.solver)
         except (TypeError, ValueError):
             raise ValueError("solver must be 'auto', 'lu', or 'gmres'") from None
+        if not _is_integral_value(self.lu_threshold) or self.lu_threshold < 1:
+            raise ValueError("lu_threshold must be a positive integer")
+        self.lu_threshold = int(self.lu_threshold)
         try:
             valid_gmres_tol = isfinite(self.gmres_tol) and self.gmres_tol > 0.0
         except (TypeError, ValueError):
@@ -423,6 +443,14 @@ class SolveConfig:
             raise ValueError("restrict_neumann_space must be a boolean")
         if not isinstance(self.return_surface_traces, bool):
             raise ValueError("return_surface_traces must be a boolean")
+        if self.aperture_tag is not None:
+            if (
+                isinstance(self.aperture_tag, bool)
+                or not _is_integral_value(self.aperture_tag)
+                or int(self.aperture_tag) <= 0
+            ):
+                raise ValueError("aperture_tag must be a positive integer or None")
+            self.aperture_tag = int(self.aperture_tag)
         if self.native_symmetry_plane not in {None, "yz", "xz", "xy", "yz+xz"}:
             raise ValueError(
                 "native_symmetry_plane must be None, 'yz', 'xz', 'xy', or 'yz+xz'"

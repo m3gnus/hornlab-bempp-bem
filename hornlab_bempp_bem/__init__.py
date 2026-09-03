@@ -31,7 +31,13 @@ from .config import (
     reject_unsupported_native_symmetry,
     uses_image_assembly,
 )
-from .device import OpenCLError, configure_opencl
+from .device import (
+    OpenCLCheck,
+    OpenCLError,
+    check_opencl,
+    configure_opencl,
+    require_opencl,
+)
 from .field_traces import evaluate_exterior_from_traces
 from .mesh import (
     LoadedMesh,
@@ -60,14 +66,17 @@ __all__ = [
     "MeshInfo",
     "ObservationConfig",
     "ObservationFrame",
+    "OpenCLCheck",
     "OpenCLError",
     "SolveConfig",
     "SolveResult",
     "SourceMotion",
     "VelocityMode",
+    "check_opencl",
     "configure_opencl",
     "evaluate_exterior_from_traces",
     "load_mesh",
+    "require_opencl",
     "resolve_assembly_backend",
     "solve",
     "solve_channel_basis",
@@ -148,6 +157,7 @@ def _resolve_mesh(
     scale: float = 1.0,
     require_closed: bool = False,
     native_symmetry_plane: str | None = None,
+    aperture_tag: int | None = None,
 ) -> LoadedMesh:
     """Accept str, Path, or LoadedMesh."""
     if isinstance(mesh, LoadedMesh):
@@ -157,12 +167,32 @@ def _resolve_mesh(
                 np.asarray(mesh.grid.elements, dtype=np.int32).T,
             )
         return mesh
-    return load_mesh(
-        mesh,
-        scale=scale,
-        require_closed=require_closed,
-        native_symmetry_plane=native_symmetry_plane,
-    )
+    load_kwargs = {
+        "scale": scale,
+        "require_closed": require_closed,
+        "native_symmetry_plane": native_symmetry_plane,
+    }
+    if aperture_tag is not None:
+        load_kwargs["aperture_tag"] = aperture_tag
+    return load_mesh(mesh, **load_kwargs)
+
+
+def _resolve_coupled_ib_config(
+    loaded: LoadedMesh,
+    config: SolveConfig,
+) -> SolveConfig:
+    """Combine explicit config and canonical mesh aperture metadata."""
+    mesh_tag = loaded.coupled_ib_aperture_tag
+    config_tag = config.aperture_tag
+    if mesh_tag is not None and config_tag is not None and mesh_tag != config_tag:
+        raise ValueError(
+            f"config aperture_tag {config_tag} conflicts with loaded mesh "
+            f"aperture tag {mesh_tag}"
+        )
+    effective_tag = config_tag if config_tag is not None else mesh_tag
+    if effective_tag == config_tag:
+        return config
+    return replace(config, aperture_tag=effective_tag)
 
 
 def _resolve_frame(loaded: LoadedMesh, config: SolveConfig) -> ObservationFrame:
@@ -211,7 +241,9 @@ def solve(
             and not uses_image_assembly(config)
         ),
         native_symmetry_plane=config.native_symmetry_plane,
+        aperture_tag=config.aperture_tag,
     )
+    config = _resolve_coupled_ib_config(loaded, config)
     _validate_velocity_source_tags(loaded.physical_tags, config.velocity_sources)
     frame = _resolve_frame(loaded, config)
 
@@ -222,6 +254,16 @@ def solve(
     )
 
     frequencies = _build_frequency_grid(config)
+
+    if config.aperture_tag is not None:
+        from .infinite_baffle import run_coupled_infinite_baffle_sweep
+
+        return run_coupled_infinite_baffle_sweep(
+            loaded,
+            frequencies,
+            frame,
+            config,
+        )
 
     workers = _resolve_worker_count(config.workers, len(frequencies))
 
@@ -381,9 +423,21 @@ def solve_frequencies(
             and not uses_image_assembly(config)
         ),
         native_symmetry_plane=config.native_symmetry_plane,
+        aperture_tag=config.aperture_tag,
     )
+    config = _resolve_coupled_ib_config(loaded, config)
     _validate_velocity_source_tags(loaded.physical_tags, config.velocity_sources)
     frame = _resolve_frame(loaded, config)
+
+    if config.aperture_tag is not None:
+        from .infinite_baffle import run_coupled_infinite_baffle_sweep
+
+        return run_coupled_infinite_baffle_sweep(
+            loaded,
+            freqs,
+            frame,
+            config,
+        )
 
     from .sweep import run_sweep_serial
 

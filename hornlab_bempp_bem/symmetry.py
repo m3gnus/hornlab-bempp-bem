@@ -905,6 +905,7 @@ def assemble_and_solve_symmetry(
     import scipy.linalg
     import scipy.sparse.linalg
 
+    from .bie import _choose_solver
     from .config import BIEFormulation, LinearSolver
 
     if config.formulation is BIEFormulation.BURTON_MILLER:
@@ -962,13 +963,7 @@ def assemble_and_solve_symmetry(
     )
     timings["symmetry_reduction_s"] = time.perf_counter() - started
 
-    solver_choice = config.solver
-    if solver_choice is LinearSolver.AUTO:
-        solver_choice = (
-            LinearSolver.LU
-            if context.reduced_element_count <= config.lu_threshold
-            else LinearSolver.GMRES
-        )
+    solver_choice = _choose_solver(config, context.reduced_element_count)
 
     iterations = None
     converged = True
