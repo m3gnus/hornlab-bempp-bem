@@ -50,8 +50,8 @@ def test_solve_single_frequency_builds_native_symmetry_context(monkeypatch):
     grid = SimpleNamespace(number_of_elements=1)
     calls = []
 
-    def stop_after_context(grid_arg, tags_arg, plane_arg):
-        calls.append((grid_arg, tags_arg.copy(), plane_arg))
+    def stop_after_context(grid_arg, tags_arg, plane_arg, *, ground_plane=None):
+        calls.append((grid_arg, tags_arg.copy(), plane_arg, ground_plane))
         raise StopAfterContextBuild
 
     monkeypatch.setattr(
@@ -68,6 +68,20 @@ def test_solve_single_frequency_builds_native_symmetry_context(monkeypatch):
     assert calls[0][0] is grid
     np.testing.assert_array_equal(calls[0][1], [2])
     assert calls[0][2] == "yz"
+    assert calls[0][3] is None
+
+    # A ground plane reaches the same context builder, carried separately so
+    # the expansion can tell a cut plane from an infinite rigid boundary.
+    calls.clear()
+    with pytest.raises(StopAfterContextBuild):
+        solve_single_frequency(
+            grid,
+            np.array([2], dtype=np.int32),
+            1000.0,
+            SolveConfig(ground_plane="xy"),
+        )
+    assert calls[0][2] is None
+    assert calls[0][3] == "xy"
 
 
 def test_native_symmetry_rejects_robin_before_context_build():

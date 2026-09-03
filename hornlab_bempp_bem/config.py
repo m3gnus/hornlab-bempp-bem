@@ -44,6 +44,8 @@ class SourceMotion:
 
 AssemblyBackend = Literal["opencl", "numba", "auto"]
 NativeSymmetryPlane = Literal["yz", "xz", "xy", "yz+xz"]
+GroundPlane = Literal["yz", "xz", "xy"]
+GROUND_PLANES = ("yz", "xz", "xy")
 VectorizationMode = Literal["auto", "novec", "vec4", "vec8", "vec16"]
 VECTORIZATION_MODES = ("auto", "novec", "vec4", "vec8", "vec16")
 _MAX_SPHERE_POINTS = 100_000
@@ -169,6 +171,34 @@ class SolveConfig:
     slp_dlp_singular_quadrature: int = 4
     hyp_adlp_quadrature: int = 4
 
+    # Wavelength-adaptive regular quadrature (opt-in; ported from
+    # boundary-lab's BEAT Engine CPU "Dynamic Quadrature"). When enabled,
+    # each frequency computes k*h with h = sqrt(p90 element area) on the
+    # solve grid; while adaptive_quadrature_kh_min <= k*h <=
+    # adaptive_quadrature_kh_max, regular (non-adjacent pair) assembly runs
+    # at adaptive_quadrature_low_order instead of slp_dlp_quadrature /
+    # hyp_adlp_quadrature. Singular
+    # quadrature (slp_dlp_singular_quadrature) and far-field evaluation are
+    # never reduced. Disabled by default so every existing solve is
+    # bit-identical to before.
+    #
+    # Note bempp-cl's regular "order" maps to Gauss point counts
+    # 1/3/4/6 for orders 1-4 (pair cost ~ points^2), which is a different
+    # scale from BEAT's q1/q2/q4 rules, so the thresholds here are tuned
+    # against the ABEC/ASRO references rather than copied from BEAT's 2.0.
+    #
+    # adaptive_quadrature_kh_min is a departure from BEAT justified by that
+    # tuning: on the ASRO68 reference, order 2 vs a converged order-6 anchor
+    # is 0.15-0.21 dB rms in the main lobe for k*h < ~0.3 (slow-converging
+    # near-pair error on a polar that is flat enough to expose it; order 3
+    # is no better), but only 0.02-0.04 dB rms for k*h in [0.4, 1.8].
+    # 0.0 disables the lower bound, recovering BEAT's pure upper-threshold
+    # behavior.
+    adaptive_quadrature: bool = False
+    adaptive_quadrature_kh_min: float = 0.4
+    adaptive_quadrature_kh_max: float = 2.0
+    adaptive_quadrature_low_order: int = 2
+
     # Linear solver
     solver: LinearSolver = LinearSolver.GMRES
     lu_threshold: int = 6000
@@ -182,6 +212,23 @@ class SolveConfig:
         default_factory=lambda: {2: 1.0}
     )
     velocity_profile: Literal["piston", "dome", "ring"] = "piston"
+
+    # Multi-channel drive with crossovers (opt-in; parity with BEAT's
+    # radiator/channel layer). Each Channel owns a disjoint subset of
+    # velocity_sources' tags and contributes a complex, frequency-dependent
+    # coefficient -- polarity, level, delay, highpass, lowpass -- multiplying
+    # that tag's prescribed normal velocity. Every driven tag must belong to
+    # exactly one channel.
+    #
+    # This costs nothing at solve time: the coefficient folds into the Neumann
+    # data, so a two-way system with its crossover in place is still one solve
+    # per frequency. Use solve_channel_basis() instead when the crossover
+    # itself is the thing being tuned -- it solves each channel once and
+    # leaves the sum to be re-taken without re-solving.
+    #
+    # Empty by default, in which case velocity_sources drives the mesh exactly
+    # as before.
+    channels: list = field(default_factory=list)
     # Direction the prescribed source velocity acts in. "normal" (default) drives
     # each source face along its own outward normal (breathing cap); "axial"
     # drives the source as a rigid piston along its axis (v_n = U*(n_hat.axis)).
@@ -233,6 +280,30 @@ class SolveConfig:
     # measured. Set it explicitly if you have benchmarked your own host.
     vectorization_mode: VectorizationMode = "auto"
     native_symmetry_plane: NativeSymmetryPlane | None = None
+
+    # Rigid half-space ground plane (opt-in; parity with BEAT's
+    # ``symmetry_mode=:ground``). Names the coordinate plane acting as an
+    # infinite, perfectly rigid boundary: "yz" is x=0, "xz" is y=0 -- BEAT's
+    # only choice -- and "xy" is z=0, the natural floor. The whole model must
+    # lie in the non-negative half space of the mirrored coordinate; the plane
+    # always passes through the origin, so a caller wanting a different height
+    # translates the mesh.
+    #
+    # Implemented as an image source with reflection coefficient +1 and no
+    # sign flip on the pressure, which is the rigid-wall boundary condition.
+    # It reuses the same mirror-image assembly as ``native_symmetry_plane``
+    # and composes with it (the two must name different planes), so a
+    # quarter-symmetric model can stand above a ground plane and pay for four
+    # images on one reduced row block.
+    #
+    # A model standing clear of the plane mirrors into a detached image body.
+    # A model *resting* on the plane is the reduced-mesh case exactly: its
+    # footprint must be an open cut so the union of body and image is one
+    # closed body, and the usual seam validation applies to it.
+    #
+    # None by default, so every existing solve is unchanged.
+    ground_plane: GroundPlane | None = None
+
     restrict_neumann_space: bool = True
 
     # Retain the complete P1 pressure and total DP0 Neumann traces needed to
@@ -328,6 +399,35 @@ class SolveConfig:
             raise ValueError(
                 "velocity_mode must be 'velocity' or 'acceleration'"
             ) from None
+        if not isinstance(self.adaptive_quadrature, bool):
+            raise ValueError("adaptive_quadrature must be a boolean")
+        for field_name in (
+            "adaptive_quadrature_kh_min", "adaptive_quadrature_kh_max",
+        ):
+            try:
+                value = float(getattr(self, field_name))
+            except (TypeError, ValueError, OverflowError):
+                value = float("nan")
+            if not isfinite(value) or value < 0.0:
+                raise ValueError(
+                    f"{field_name} must be finite and non-negative"
+                )
+            setattr(self, field_name, value)
+        if self.adaptive_quadrature_kh_min > self.adaptive_quadrature_kh_max:
+            raise ValueError(
+                "adaptive_quadrature_kh_min must not exceed "
+                "adaptive_quadrature_kh_max"
+            )
+        if (
+            not _is_integral_value(self.adaptive_quadrature_low_order)
+            or self.adaptive_quadrature_low_order < 1
+        ):
+            raise ValueError(
+                "adaptive_quadrature_low_order must be a positive integer"
+            )
+        self.adaptive_quadrature_low_order = int(
+            self.adaptive_quadrature_low_order
+        )
         if self.precision not in {"single", "double"}:
             raise ValueError("precision must be 'single' or 'double'")
         if self.assembly_backend not in {"opencl", "numba", "auto"}:
@@ -355,14 +455,53 @@ class SolveConfig:
             raise ValueError(
                 "native_symmetry_plane must be None, 'yz', 'xz', 'xy', or 'yz+xz'"
             )
+        if self.ground_plane is not None:
+            if self.ground_plane not in GROUND_PLANES:
+                raise ValueError(
+                    "ground_plane must be None, "
+                    + ", ".join(repr(name) for name in GROUND_PLANES)
+                )
+            if self.native_symmetry_plane is not None and self.ground_plane in (
+                str(self.native_symmetry_plane).split("+")
+            ):
+                raise ValueError(
+                    f"ground_plane {self.ground_plane!r} is also declared in "
+                    f"native_symmetry_plane {self.native_symmetry_plane!r}; a "
+                    "reduced mesh's cut plane cannot also be an infinite rigid "
+                    "boundary"
+                )
         if self.source_motion not in {SourceMotion.NORMAL, SourceMotion.AXIAL}:
             raise ValueError("source_motion must be 'normal' or 'axial'")
+        if self.channels:
+            from .channels import Channel, validate_channels
+
+            if not all(isinstance(item, Channel) for item in self.channels):
+                raise ValueError(
+                    "channels must be a list of hornlab_bempp_bem.Channel"
+                )
+            self.channels = list(self.channels)
+            validate_channels(self.channels, self.velocity_sources)
         if self.velocity_profile != "piston":
             raise NotImplementedError(
                 "hornlab-bempp-bem only supports velocity_profile='piston'; "
                 "use hornlab-metal-bem source_velocity_profiles for shaped "
                 "source profiles"
             )
+
+
+def uses_image_assembly(config: SolveConfig) -> bool:
+    """Whether this solve runs on the mirror-image (expanded-grid) assembler.
+
+    True for a reduced half/quarter mesh, for a rigid ground plane, and for
+    both together. Every site that used to branch on
+    ``native_symmetry_plane is not None`` asks this instead, so the ground
+    plane reaches the same assembly, field evaluation, and trace-retention
+    paths the reduced meshes already use.
+    """
+    return (
+        config.native_symmetry_plane is not None
+        or config.ground_plane is not None
+    )
 
 
 def reject_unsupported_native_symmetry(config: SolveConfig) -> None:
@@ -378,17 +517,24 @@ def reject_unsupported_native_symmetry(config: SolveConfig) -> None:
             "models ('yz', 'xz', and 'yz+xz'); legacy 'xy' symmetry is not "
             "implemented"
         )
-    if config.native_symmetry_plane is None:
+    if config.native_symmetry_plane is None and config.ground_plane is None:
         return
     # Mirrored by the same guards inside assemble_and_solve_symmetry, which
-    # stay as a backstop for callers reaching that function directly.
+    # stay as a backstop for callers reaching that function directly. A ground
+    # plane rides the same mirror-image assembler, so it inherits the same two
+    # limits.
+    subject = (
+        "a ground plane"
+        if config.native_symmetry_plane is None
+        else "native half/quarter symmetry"
+    )
     if config.formulation is BIEFormulation.BURTON_MILLER:
         raise NotImplementedError(
-            "native half/quarter symmetry currently supports STANDARD and "
+            f"{subject} currently supports STANDARD and "
             "COMPLEX_K formulations; Burton-Miller is not implemented"
         )
     if config.impedance_sources:
         raise NotImplementedError(
-            "native half/quarter symmetry with Robin impedance boundaries "
+            f"{subject} with Robin impedance boundaries "
             "is not implemented yet"
         )

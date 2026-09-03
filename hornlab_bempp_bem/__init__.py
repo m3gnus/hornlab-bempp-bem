@@ -3,12 +3,14 @@
 Public API:
     solve(mesh, config)            → SolveResult (full frequency sweep)
     solve_frequencies(mesh, freqs) → SolveResult (caller-ordered frequencies)
+    solve_channel_basis(mesh, cfg) → ChannelBasisResult (one row per channel)
     load_mesh(path, scale)         → LoadedMesh
 """
 from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import replace
 
 import numpy as np
@@ -18,6 +20,7 @@ from .backends import (
     AssemblyBackendUnavailable,
     resolve_assembly_backend,
 )
+from .channels import Channel, Crossover
 from .config import (
     BIEFormulation,
     LinearSolver,
@@ -26,6 +29,7 @@ from .config import (
     SourceMotion,
     VelocityMode,
     reject_unsupported_native_symmetry,
+    uses_image_assembly,
 )
 from .device import (
     OpenCLCheck,
@@ -43,32 +47,40 @@ from .mesh import (
     load_mesh,
 )
 from .observation import ObservationFrame, infer_frame
-from .result import MeshInfo, SolveResult
+from .result import (
+    ChannelBasisResult,
+    MeshInfo,
+    SolveResult,
+)
 
 __all__ = [
-    "solve",
-    "solve_frequencies",
-    "load_mesh",
-    "SolveConfig",
-    "SolveResult",
-    "ObservationConfig",
+    "AssemblyBackendResolution",
+    "AssemblyBackendUnavailable",
     "BIEFormulation",
+    "Channel",
+    "ChannelBasisResult",
+    "Crossover",
     "LinearSolver",
-    "VelocityMode",
-    "SourceMotion",
     "LoadedMesh",
-    "MeshInfo",
     "MeshError",
+    "MeshInfo",
+    "ObservationConfig",
     "ObservationFrame",
     "OpenCLCheck",
     "OpenCLError",
+    "SolveConfig",
+    "SolveResult",
+    "SourceMotion",
+    "VelocityMode",
     "check_opencl",
     "configure_opencl",
-    "require_opencl",
-    "AssemblyBackendResolution",
-    "AssemblyBackendUnavailable",
-    "resolve_assembly_backend",
     "evaluate_exterior_from_traces",
+    "load_mesh",
+    "require_opencl",
+    "resolve_assembly_backend",
+    "solve",
+    "solve_channel_basis",
+    "solve_frequencies",
 ]
 
 logger = logging.getLogger(__name__)
@@ -226,7 +238,7 @@ def solve(
         scale=config.mesh_scale,
         require_closed=(
             config.require_closed_mesh
-            and config.native_symmetry_plane is None
+            and not uses_image_assembly(config)
         ),
         native_symmetry_plane=config.native_symmetry_plane,
         aperture_tag=config.aperture_tag,
@@ -274,6 +286,118 @@ def solve(
         )
 
 
+def solve_channel_basis(
+    mesh,
+    config: SolveConfig | None = None,
+    frequencies_hz: list[float] | np.ndarray | None = None,
+) -> ChannelBasisResult:
+    """Solve each channel once, at unit drive, for re-summing later.
+
+    ``config.channels`` must be set. Each channel is solved with only its own
+    source tags driven -- the others are held at zero, not removed, so every
+    channel's result still carries the surface pressure induced on every driven
+    tag and the observation frame is identical across channels.
+
+    Use this when the crossover is what is being tuned. The sum
+    :meth:`ChannelBasisResult.synthesize` takes is exactly the solve that
+    driving all channels together would produce, because the boundary integral
+    equation is linear in the prescribed Neumann data -- so re-tuning costs a
+    complex multiply-add per point instead of a sweep. The price is one sweep
+    per channel up front; ``solve()`` with the same ``channels`` set is a
+    single sweep and gives the same synthesized answer for one fixed crossover.
+    """
+    if config is None:
+        config = SolveConfig()
+    if not config.channels:
+        raise ValueError(
+            "solve_channel_basis requires config.channels; use solve() for a "
+            "single-drive model"
+        )
+    reject_unsupported_native_symmetry(config)
+
+    loaded = _resolve_mesh(
+        mesh,
+        scale=config.mesh_scale,
+        require_closed=(
+            config.require_closed_mesh and not uses_image_assembly(config)
+        ),
+        native_symmetry_plane=config.native_symmetry_plane,
+    )
+    _validate_velocity_source_tags(loaded.physical_tags, config.velocity_sources)
+    # One frame for every channel: resolved from the full source set, before
+    # any channel restriction can move ``min(velocity_sources)`` and with it
+    # the inferred axis.
+    frame = _resolve_frame(loaded, config)
+
+    from .sweep import _build_frequency_grid, run_sweep_serial
+
+    frequencies = (
+        _build_frequency_grid(config)
+        if frequencies_hz is None
+        else _coerce_frequencies(frequencies_hz)
+    )
+
+    started = time.time()
+    channels = tuple(config.channels)
+    results = []
+    for channel in channels:
+        driven = {
+            tag: (
+                complex(weight) * channel.sources[tag]
+                if tag in channel.sources
+                else 0.0
+            )
+            for tag, weight in config.velocity_sources.items()
+        }
+        channel_config = replace(
+            config, velocity_sources=driven, channels=[], frame_override=frame,
+        )
+        results.append(
+            run_sweep_serial(
+                loaded,
+                frequencies,
+                frame,
+                channel_config,
+                mesh_contracts_validated=True,
+            )
+        )
+
+    first = results[0]
+    surface = None
+    if first.surface_pressure_avg is not None:
+        surface = {
+            tag: np.stack(
+                [result.surface_pressure_avg[tag] for result in results], axis=0,
+            )
+            for tag in first.surface_pressure_avg
+        }
+    sphere = (
+        np.stack([result.sphere_pressure_complex for result in results], axis=0)
+        if first.sphere_pressure_complex is not None
+        else None
+    )
+    return ChannelBasisResult(
+        channel_names=tuple(channel.name for channel in channels),
+        channels=channels,
+        frequencies_hz=first.frequencies_hz,
+        pressure_complex=np.stack(
+            [result.pressure_complex for result in results], axis=0,
+        ),
+        impedance=np.stack([result.impedance for result in results], axis=0),
+        observation_angles_deg=first.observation_angles_deg,
+        observation_points=first.observation_points,
+        observation_planes=list(first.observation_planes),
+        config=config,
+        mesh_info=first.mesh_info,
+        results=tuple(results),
+        timings={"total_s": time.time() - started},
+        sphere_pressure_complex=sphere,
+        sphere_theta_deg=first.sphere_theta_deg,
+        sphere_phi_deg=first.sphere_phi_deg,
+        surface_pressure_avg=surface,
+    )
+
+
 def solve_frequencies(
     mesh,
     frequencies_hz: list[float] | np.ndarray,
@@ -296,7 +420,7 @@ def solve_frequencies(
         scale=config.mesh_scale,
         require_closed=(
             config.require_closed_mesh
-            and config.native_symmetry_plane is None
+            and not uses_image_assembly(config)
         ),
         native_symmetry_plane=config.native_symmetry_plane,
         aperture_tag=config.aperture_tag,

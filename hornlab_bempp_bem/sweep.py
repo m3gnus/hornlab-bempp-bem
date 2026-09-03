@@ -21,7 +21,7 @@ from .bie import (
     compute_surface_pressure_avg,
     solve_single_frequency,
 )
-from .config import SolveConfig, SourceMotion
+from .config import SolveConfig, SourceMotion, uses_image_assembly
 from .mesh import (
     LoadedMesh,
     _require_closed_surface,
@@ -36,10 +36,15 @@ from .result import SolveResult
 
 logger = logging.getLogger(__name__)
 
+# An observation point within this distance below a ground plane counts as
+# lying on it. 1 um matches mesh._SYMMETRY_SNAP_TOLERANCE, the same scale
+# the expansion uses to decide a vertex is on a mirror plane.
+_GROUND_OBSERVATION_TOLERANCE_M = 1.0e-6
+
 
 def _solver_log_entry(fr: FrequencyResult) -> dict:
     """Build the diagnostic fields shared by every sweep execution path."""
-    return {
+    entry = {
         "frequency_hz": fr.frequency_hz,
         "iterations": fr.iterations,
         "converged": fr.converged,
@@ -54,6 +59,78 @@ def _solver_log_entry(fr: FrequencyResult) -> dict:
         "reason": fr.backend_fallback_reason,
         "phase_timings": dict(fr.phase_timings),
     }
+    if fr.regular_quadrature:
+        entry["regular_quadrature"] = dict(fr.regular_quadrature)
+    return entry
+
+
+def _retained_surface_traces(
+    freq_results: list[FrequencyResult],
+    enabled: bool,
+) -> tuple[
+    NDArray[np.complex128] | None,
+    NDArray[np.complex128] | None,
+]:
+    """Stack solve-space P1 pressure and total DP0 Neumann coefficients."""
+    if not enabled:
+        return None, None
+    pressure = np.stack(
+        [
+            np.asarray(fr.pressure_on_surface.coefficients, dtype=np.complex128)
+            for fr in freq_results
+        ],
+        axis=0,
+    )
+    neumann = np.stack(
+        [
+            np.asarray(fr.neumann_data.coefficients, dtype=np.complex128)
+            for fr in freq_results
+        ],
+        axis=0,
+    )
+    return pressure, neumann
+
+
+def _warn_observation_below_ground(
+    config: SolveConfig,
+    *point_arrays: NDArray[np.float64] | None,
+) -> int:
+    """Warn about observation points on the far side of the ground plane.
+
+    Pressure there is not wrong so much as meaningless: the representation
+    formula is even about the plane, so it returns the mirror of the point
+    above ground rather than anything inside the rigid half space. Warning
+    rather than raising keeps a polar arc that dips below the floor usable --
+    BEAT clips such points instead, which would change array shapes here and
+    silently break every caller's angle indexing.
+    """
+    from .config import GROUND_PLANES
+
+    if config.ground_plane is None:
+        return 0
+    component = GROUND_PLANES.index(config.ground_plane)
+    axis = "XYZ"[component]
+    below = 0
+    lowest = 0.0
+    for points in point_arrays:
+        if points is None:
+            continue
+        values = np.asarray(points, dtype=np.float64).reshape(-1, 3)[:, component]
+        # A tolerance, not zero: an arc endpoint that lands on the plane is on
+        # the boundary of the physical domain, not outside it.
+        offending = values < -_GROUND_OBSERVATION_TOLERANCE_M
+        below += int(np.count_nonzero(offending))
+        if offending.any():
+            lowest = min(lowest, float(values.min()))
+    if below:
+        logger.warning(
+            "ground_plane=%r puts %d observation point(s) at %s < 0 (lowest "
+            "%.4g m), inside the rigid half space. Pressure returned there is "
+            "the mirror of the point above the plane, not a physical field "
+            "value.",
+            config.ground_plane, below, axis, lowest,
+        )
+    return below
 
 
 def _warn_backend_fallback(log_entry: dict) -> None:
@@ -98,33 +175,6 @@ def _field_operator_kwargs(
             vectorization_mode=getattr(config, "vectorization_mode", "auto"),
         )
     return cache[cache_key]
-
-
-def _retained_surface_traces(
-    freq_results: list[FrequencyResult],
-    enabled: bool,
-) -> tuple[
-    NDArray[np.complex128] | None,
-    NDArray[np.complex128] | None,
-]:
-    """Stack solve-space P1 pressure and total DP0 Neumann coefficients."""
-    if not enabled:
-        return None, None
-    pressure = np.stack(
-        [
-            np.asarray(fr.pressure_on_surface.coefficients, dtype=np.complex128)
-            for fr in freq_results
-        ],
-        axis=0,
-    )
-    neumann = np.stack(
-        [
-            np.asarray(fr.neumann_data.coefficients, dtype=np.complex128)
-            for fr in freq_results
-        ],
-        axis=0,
-    )
-    return pressure, neumann
 
 
 def _build_frequency_grid(config: SolveConfig) -> NDArray[np.float64]:
@@ -292,9 +342,10 @@ def run_sweep_serial(
         sphere_points, sphere_theta_deg, sphere_phi_deg = build_sphere_grid_points(
             frame, config.observation,
         )
+    _warn_observation_below_ground(config, obs_points, sphere_points)
 
     symmetry_context = None
-    if config.native_symmetry_plane is None:
+    if not uses_image_assembly(config):
         p1_space, dp0_space = _setup_function_spaces(mesh.grid)
     else:
         from .symmetry import build_symmetry_context
@@ -303,6 +354,7 @@ def run_sweep_serial(
             mesh.grid,
             mesh.physical_tags,
             config.native_symmetry_plane,
+            ground_plane=config.ground_plane,
         )
         if config.require_closed_mesh:
             _require_closed_surface(
@@ -534,6 +586,7 @@ def run_sweep_parallel(
         sphere_points, sphere_theta_deg, sphere_phi_deg = build_sphere_grid_points(
             frame, config.observation,
         )
+    _warn_observation_below_ground(config, obs_points, sphere_points)
 
     chunks = np.array_split(frequencies, min(worker_count, len(frequencies)))
     chunk_indices = np.array_split(
@@ -804,7 +857,7 @@ def _worker_solve_chunk_inner(
 
     grid = bempp_api.Grid(mesh_grid_verts, mesh_grid_elems)
     symmetry_context = None
-    if config.native_symmetry_plane is None:
+    if not uses_image_assembly(config):
         p1_space, dp0_space = _setup_function_spaces(grid)
     else:
         from .symmetry import build_symmetry_context
@@ -813,6 +866,7 @@ def _worker_solve_chunk_inner(
             grid,
             physical_tags,
             config.native_symmetry_plane,
+            ground_plane=config.ground_plane,
         )
         if config.require_closed_mesh:
             _require_closed_surface(

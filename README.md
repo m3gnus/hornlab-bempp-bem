@@ -216,6 +216,68 @@ mesh-sensitive near a resonance. Use independently validated frequency points
 for production conclusions until a symmetry-compatible combined-field or
 Burton-Miller path is available.
 
+## Rigid Ground Plane
+
+Set `ground_plane` to model an infinite, perfectly rigid boundary — a floor, a
+half-space measurement, or a large flat baffle the model stands on:
+
+- `"yz"`: rigid plane at `X = 0`, model in `X >= 0`
+- `"xz"`: rigid plane at `Y = 0`, model in `Y >= 0` (BEAT's only choice)
+- `"xy"`: rigid plane at `Z = 0`, model in `Z >= 0`
+
+```python
+config = SolveConfig(ground_plane="xy")            # cabinet on the floor
+config = SolveConfig(native_symmetry_plane="yz",   # ... and mirror-symmetric
+                     ground_plane="xy")
+```
+
+The plane always passes through the origin; translate the mesh to place it at
+a different height. The model must lie entirely on the non-negative side.
+
+This is an image source with reflection coefficient `+1` and no sign flip on
+the pressure, which is what a rigid wall means, and it rides the same
+mirror-image assembler as `native_symmetry_plane` — so the two compose (they
+must name different planes) and a quarter-symmetric model above a ground plane
+pays for four images on one reduced row block. The transform matches BEAT's
+`symmetry_mode=:ground` exactly.
+
+A model standing clear of the plane mirrors into a detached image body. A
+model *resting* on it is the reduced-mesh case: its footprint must be an open
+cut, so that the union of body and image is one closed body, and the usual
+seam validation applies. A closed body whose bottom face lies in the plane is
+refused, because that face would coincide with its own image.
+
+### Standing very close to the plane
+
+Bempp's singular quadrature owns coincident and adjacent element pairs. A
+detached image is neither, so a model hovering a small fraction of an element
+above the plane has elements that are near-singularly close to their own
+images with only the regular rule to integrate them. Measured on a driven
+sphere at 2 kHz against a converged order-8 solve, at the default regular
+order 4:
+
+| gap / element size | error vs converged |
+| --- | --- |
+| 10.8 | 4.8e-4 dB |
+| 1.8 | 1.2e-4 dB |
+| 0.18 | 5.9e-4 dB |
+| 0.04 | 1.6e-1 dB |
+
+So keep the gap above roughly a fifth of an element, or rest the model on the
+plane — then the footprint welds and the singular rule takes over. Below that
+ratio the expansion warns. Raising `slp_dlp_quadrature` recovers most of it
+(0.011 dB at order 6 for the 0.04 case). BEAT solves this properly, with a
+per-face-pair near-correction cache keyed on distance; bempp-cl has no
+per-pair quadrature override, so the order is global here.
+
+Observation points below the plane are warned about, not clipped: the
+representation formula is even about the plane, so pressure returned there is
+the mirror of the point above it rather than a field inside the rigid half
+space.
+
+A ground plane inherits the image assembler's limits — `STANDARD` and
+`COMPLEX_K` only, no Robin `impedance_sources`.
+
 `ObservationConfig` builds polar observation arcs by default:
 
 ```python
@@ -245,6 +307,69 @@ spherical field from the same solved system. Theta runs from the forward axis
 through `sphere_theta_max_deg` (180° by default); phi wraps around the axis
 without a duplicate 360° column. This field is independent of the selected
 display planes and is suitable for solid-angle directivity integration.
+
+## Channels and Crossovers
+
+`velocity_sources` maps each physical tag to its own drive weight. `channels`
+groups those tags into amplifier outputs and gives each one a level, a
+polarity, a delay, and a highpass and lowpass section:
+
+```python
+from hornlab_bempp_bem import Channel, Crossover, SolveConfig, solve
+
+config = SolveConfig(
+    velocity_sources={2: 1.0, 3: 0.6},
+    channels=[
+        Channel("lf", [2],
+                lowpass=Crossover("lowpass", 1500.0, "linkwitz_riley", 4)),
+        Channel("hf", [3], level_db=-2.5, polarity=-1, delay_ms=0.15,
+                highpass=Crossover("highpass", 1500.0, "linkwitz_riley", 4)),
+    ],
+)
+result = solve("two-way.msh", config)
+```
+
+Butterworth orders 1, 2, 4, 6 and Linkwitz-Riley 2, 4, 6 (a Butterworth
+section of half the order, cascaded twice). Every driven tag must belong to
+exactly one channel — two channels on one tag would need two prescribed normal
+velocities on the same faces.
+
+A channel's coefficient folds into the Neumann data, so a crossed-over
+multi-way system is still **one solve per frequency**. Give `Channel.sources`
+a mapping instead of a list for a relative gain, complex if you want a fixed
+relative phase, between radiators on the same channel.
+
+### Tuning the crossover without re-solving
+
+```python
+from hornlab_bempp_bem import solve_channel_basis
+
+basis = solve_channel_basis("two-way.msh", config)   # one sweep per channel
+result = basis.synthesize()                          # as if solved together
+tweaked = basis.synthesize(other_channels)           # re-tuned, no re-solve
+flat = basis.synthesize(flat_target=True)            # per-channel normalised
+```
+
+The boundary integral equation is linear in the prescribed Neumann data, so
+any weighted sum of the per-channel rows *is* the solve that driving them
+together would produce — measured agreement is at solver round-off. Use this
+when the crossover is the thing being tuned; use `solve()` with `channels` set
+when it is fixed, since that is a single sweep.
+
+`flat_target=True` divides each channel by the magnitude of its own pressure
+at the reference point first, so the synthesized response is the crossover's
+own shape rather than the crossover multiplied by each driver's native
+rolloff. It normalises magnitude only; each channel keeps its acoustic phase.
+
+### Phase convention
+
+This package uses `e^{-iωt}`, so filters are evaluated at `s = -iω` and a
+delay of τ is `e^{+iωτ}`. Both are the opposite sign from the `e^{+iωt}` form
+in most filter texts. The responses are therefore the complex conjugates of
+the standard-audio ones — identical in magnitude, which is why a sign error
+here is invisible on a magnitude plot and wrong the moment two channels sum.
+The implementation is checked against `scipy.signal.butter` conjugated into
+this convention, and agrees with BEAT's own DSP to 2e-15.
 
 ## Formulations
 
