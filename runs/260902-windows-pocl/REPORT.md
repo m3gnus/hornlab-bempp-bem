@@ -166,7 +166,7 @@ Two decisions are easy to conflate here and are worth keeping apart:
 - **Per-machine installation** of `intel-opencl-rt` by a developer, which is
   what this box does, needs no read of the EULA by anyone but that developer.
 - **Bundling it into a HornLab installer** is redistribution, and that is the
-  question for Magnus. This work does not change it.
+  question for the maintainer. This work does not change it.
 
 Revisit PoCL if upstream ships a Windows build that links kernels without an
 MSVC toolchain — a statically linked `lld` plus a freestanding kernel ABI would
