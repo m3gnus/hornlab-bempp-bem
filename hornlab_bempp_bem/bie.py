@@ -708,7 +708,7 @@ def solve_single_frequency(
             source_axis = infer_frame(
                 grid,
                 physical_tags,
-                source_tag=_impedance_source_tag(config.velocity_sources),
+                source_tag=min(config.velocity_sources.keys(), default=2),
                 origin_at=config.observation.origin,
                 # Without the plane the reduced-mesh PCA is quadrant-biased,
                 # and an axis picking up an x/y component makes the per-face

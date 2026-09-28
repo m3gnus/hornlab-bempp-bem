@@ -128,6 +128,27 @@ def _two_tag_off_axis_grid(theta_rad: float) -> SimpleNamespace:
     return SimpleNamespace(vertices=verts.T, elements=elements.T)
 
 
+def test_padded_zero_weight_source_does_not_move_observation_frame():
+    from hornlab_bempp_bem import _resolve_frame
+    from hornlab_bempp_bem.observation import infer_frame
+
+    grid = _two_tag_off_axis_grid(np.pi / 4.0)
+    tags = np.array([2, 3], dtype=np.int32)
+    mesh = SimpleNamespace(grid=grid, physical_tags=tags)
+    config = SolveConfig(velocity_sources={2: 0.0, 3: 1.0})
+
+    frame = _resolve_frame(mesh, config)
+    baseline = infer_frame(
+        grid,
+        tags,
+        source_tag=min(config.velocity_sources),
+        origin_at=config.observation.origin,
+        symmetry_plane=config.native_symmetry_plane,
+    )
+    np.testing.assert_allclose(frame.source_center, baseline.source_center)
+    np.testing.assert_allclose(frame.axis, baseline.axis)
+
+
 # ---------------------------------------------------------------------------
 # air_density passed into Neumann data
 # ---------------------------------------------------------------------------
