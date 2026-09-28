@@ -1,7 +1,7 @@
 """Coupled interior-BEM / Rayleigh infinite-baffle solver.
 
 The aperture closes one interior acoustic domain. Its normal points into the
-cavity, matching HornLab's Metal/CircSym convention. The unknown aperture
+cavity, matching the full-3D Metal convention. The unknown aperture
 Neumann trace is coupled to the exterior half-space through
 
     p_aperture = 2 V_R q_aperture,

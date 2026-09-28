@@ -4,9 +4,10 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from scipy.special import j1
+from scipy.special import j1, struve
 
 import hornlab_bempp_bem as bempp_bem
+from hornlab_bempp_bem._constants import SPEED_OF_SOUND
 from hornlab_bempp_bem.config import ObservationConfig, SolveConfig, VelocityMode
 from hornlab_bempp_bem import infinite_baffle
 from hornlab_bempp_bem.infinite_baffle import _validate_coupled_infinite_baffle
@@ -138,24 +139,6 @@ def _frame(depth: float = 0.004) -> ObservationFrame:
         mouth_center=origin,
         source_center=np.array([0.0, 0.0, -depth]),
     )
-
-
-def _channel_meridian(radius: float = 0.04, depth: float = 0.004):
-    metal_bem = pytest.importorskip("hornlab_metal_bem")
-    target_edge = radius / 2.0
-    control = np.asarray(
-        [[0.0, -depth], [radius, -depth], [radius, 0.0], [0.0, 0.0]],
-        dtype=np.float64,
-    )
-    edge_tags = [TAG_THROAT, TAG_WALL, TAG_APERTURE]
-    points = [control[0]]
-    tags: list[int] = []
-    for start, end, tag in zip(control[:-1], control[1:], edge_tags, strict=True):
-        count = max(1, int(np.ceil(float(np.linalg.norm(end - start)) / target_edge)))
-        for index in range(1, count + 1):
-            points.append(start + (end - start) * (index / count))
-            tags.append(tag)
-    return metal_bem.MeridianMesh.from_polyline(np.asarray(points), np.asarray(tags))
 
 
 def _config(**overrides) -> SolveConfig:
@@ -378,56 +361,43 @@ def test_bempp_coupled_ib_solves_forward_only_and_enforces_aperture_continuity()
 
 
 @pytest.mark.slow
-def test_bempp_coupled_ib_matches_portable_circsym_absolute_field():
-    """Cross-package gate catches normalized-pattern and global phase/sign drift."""
-
-    metal_bem = pytest.importorskip("hornlab_metal_bem")
-    from hornlab_metal_bem.config import (
-        ObservationConfig as MetalObservationConfig,
-        SolveConfig as MetalSolveConfig,
-        VelocityMode as MetalVelocityMode,
-    )
-
+def test_bempp_coupled_ib_matches_baffled_piston_absolute_field():
+    """Pin the coupled field to the analytic shallow-channel piston limit."""
     frequency = 1000.0
-    bempp_result = bempp_bem.solve_frequencies(
-        _channel_mesh(), [frequency], _config()
+    radius = 0.04
+    distance = 1.5
+    result = bempp_bem.solve_frequencies(_channel_mesh(), [frequency], _config())
+    medium = _config()
+    k = 2.0 * np.pi * frequency / SPEED_OF_SOUND
+    # With exp(-i omega t), p = -i omega rho times the Rayleigh half-space
+    # single layer. Its on-axis disc integral is (exp(ik R)-exp(ik d))/(ik).
+    expected = -medium.air_density * SPEED_OF_SOUND * (
+        np.exp(1j * k * np.hypot(distance, radius)) - np.exp(1j * k * distance)
     )
-    circsym_result = metal_bem.solve_circsym_frequencies(
-        _channel_meridian(),
-        [frequency],
-        MetalSolveConfig(
-            circsym_aperture_tag=TAG_APERTURE,
-            velocity_sources={TAG_THROAT: 1.0},
-            velocity_mode=MetalVelocityMode.VELOCITY,
-            observation=MetalObservationConfig(
-                planes=["horizontal"],
-                distance_m=1.5,
-                angle_min_deg=0.0,
-                angle_max_deg=180.0,
-                angle_count=7,
-                origin="mouth",
-            ),
-        ),
-    )
+    measured = result.pressure_complex[0, 0, 0]
+    assert abs(measured) / abs(expected) == pytest.approx(1.0, rel=0.15)
+    assert abs(np.rad2deg(np.angle(measured / expected))) < 8.0
 
+    angles = result.observation_angles_deg[:4]
+    x = k * radius * np.sin(np.deg2rad(angles))
+    airy = np.ones_like(x)
+    airy[1:] = 2.0 * j1(x[1:]) / x[1:]
     np.testing.assert_allclose(
-        bempp_result.observation_angles_deg,
-        circsym_result.observation_angles_deg,
-        atol=1.0e-12,
+        result.spl_db[0, 0, :4], 20.0 * np.log10(np.abs(airy)), atol=0.05
     )
-    np.testing.assert_allclose(
-        bempp_result.spl_db[0, 0, :4],
-        circsym_result.directivity_db[0, 0, :4],
-        atol=0.25,
-    )
-    assert bempp_result.pressure_complex[0, 0, -1] == 0.0
-    assert circsym_result.pressure_complex[0, 0, -1] == 0.0
+    assert result.pressure_complex[0, 0, -1] == 0.0
 
-    bempp_on_axis = bempp_result.pressure_complex[0, 0, 0]
-    circsym_on_axis = circsym_result.pressure_complex[0, 0, 0]
-    amplitude_ratio = abs(bempp_on_axis) / abs(circsym_on_axis)
-    phase_delta_deg = abs(
-        np.rad2deg(np.angle(bempp_on_axis / circsym_on_axis))
-    )
-    assert amplitude_ratio == pytest.approx(1.0, rel=0.15)
-    assert phase_delta_deg < 8.0
+
+@pytest.mark.slow
+@pytest.mark.parametrize("frequency", [800.0, 1600.0])
+def test_bempp_coupled_ib_impedance_matches_baffled_piston(frequency: float):
+    radius = 0.04
+    result = bempp_bem.solve_frequencies(_channel_mesh(), [frequency], _config())
+    medium = _config()
+    ka = 2.0 * np.pi * frequency * radius / SPEED_OF_SOUND
+    resistance = medium.air_density * SPEED_OF_SOUND * (1.0 - j1(2.0 * ka) / ka)
+    # Negative reactance follows this solver's exp(-i omega t) convention.
+    reactance = -medium.air_density * SPEED_OF_SOUND * struve(1, 2.0 * ka) / ka
+    # Source pressure includes the 4 mm channel and coarse mesh bias.
+    assert result.impedance[0].real == pytest.approx(resistance, rel=0.30)
+    assert result.impedance[0].imag == pytest.approx(reactance, rel=0.30)

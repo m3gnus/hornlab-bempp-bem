@@ -98,14 +98,10 @@ jobs:
           echo "Collected, not executed: set HORNLAB_ASRO68_MESH and HORNLAB_VALIDATION_ARTIFACTS to run it."
           python -m pytest tests/test_reference_asro68.py --collect-only -q
 
-      # The coupled infinite-baffle solver's cross-package gate compares
-      # absolute field against hornlab-metal-bem's portable CircSym path.
-      # hornlab-metal-bem is a sibling repository with no PyPI release, so the
-      # test importorskips here while the rest of that module runs -- the same
-      # silent-skip hazard, narrowed to one node id so a rename or a deletion
-      # fails collection with exit 4.
-      - name: Cross-package infinite-baffle gate is still present
-        run: python -m pytest "tests/test_infinite_baffle.py::test_bempp_coupled_ib_matches_portable_circsym_absolute_field" --collect-only -q
+      # Keep the absolute-field gate against the analytic baffled piston.
+      # A missing or renamed node fails collection with exit 4.
+      - name: Analytic infinite-baffle gate is still present
+        run: python -m pytest "tests/test_infinite_baffle.py::test_bempp_coupled_ib_matches_baffled_piston_absolute_field" --collect-only -q
 
       # On macOS and Windows these skip on the device probe, for the same
       # reason and with the same blind spot. On Linux pocl makes them run, so
