@@ -29,7 +29,12 @@ from .bie import (
     _restrict_neumann_to_nonzero_support,
     compute_surface_pressure_avg,
 )
-from .config import BIEFormulation, SolveConfig, SourceMotion
+from .config import (
+    BIEFormulation,
+    SolveConfig,
+    SourceMotion,
+    _impedance_source_tag,
+)
 from .mesh import LoadedMesh, MeshError, _require_closed_surface
 from .observation import (
     ObservationFrame,
@@ -377,6 +382,9 @@ def run_coupled_infinite_baffle_sweep(
     solver_log: list[dict] = []
     completed_frequencies: list[float] = []
     source_tags = [int(tag) for tag in config.velocity_sources]
+    impedance_source_tag = (
+        _impedance_source_tag(config.velocity_sources) if source_tags else None
+    )
     surface_pressure_avg: dict[int, list[complex]] = {
         tag: [] for tag in source_tags
     }
@@ -527,7 +535,11 @@ def run_coupled_infinite_baffle_sweep(
             p1_space,
             source_tags,
         )
-        impedance = pavg[min(source_tags)] if source_tags else 0.0 + 0.0j
+        impedance = (
+            pavg[impedance_source_tag]
+            if impedance_source_tag is not None
+            else 0.0 + 0.0j
+        )
         for source_tag in source_tags:
             surface_pressure_avg[source_tag].append(pavg[source_tag])
 

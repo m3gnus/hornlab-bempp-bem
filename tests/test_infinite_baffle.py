@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from scipy.special import j1
 
 import hornlab_bempp_bem as bempp_bem
 from hornlab_bempp_bem.config import ObservationConfig, SolveConfig, VelocityMode
+from hornlab_bempp_bem import infinite_baffle
 from hornlab_bempp_bem.infinite_baffle import _validate_coupled_infinite_baffle
 from hornlab_bempp_bem.mesh import LoadedMesh, MeshError, _resolve_coupled_ib_aperture_tag
 from hornlab_bempp_bem.observation import ObservationFrame
@@ -202,6 +205,137 @@ def test_coupled_ib_geometry_accepts_canonical_channel_and_rejects_wrong_frame()
     wrong_frame.axis = -wrong_frame.axis
     with pytest.raises(ValueError, match="frame axis"):
         _validate_coupled_infinite_baffle(mesh, _config(), wrong_frame)
+
+
+def test_coupled_ib_impedance_uses_lowest_driven_tag_and_zero_fallback(monkeypatch):
+    bempp_api = pytest.importorskip("bempp_cl.api")
+    from scipy.sparse import csr_matrix
+
+    class MatrixOperator:
+        def __init__(self, matrix):
+            self.matrix = np.asarray(matrix, dtype=np.complex128)
+
+        def __rmul__(self, value):
+            return MatrixOperator(value * self.matrix)
+
+        def __sub__(self, other):
+            return MatrixOperator(self.matrix - other.matrix)
+
+        def weak_form(self):
+            return self
+
+    geometry = infinite_baffle._ApertureGeometry(
+        element_indices=np.array([2], dtype=np.int64),
+        center=np.zeros(3),
+        inward_normal=np.array([0.0, 0.0, -1.0]),
+        outward_normal=np.array([0.0, 0.0, 1.0]),
+    )
+    monkeypatch.setattr(
+        infinite_baffle, "_validate_coupled_infinite_baffle", lambda *_: geometry
+    )
+    monkeypatch.setattr(
+        infinite_baffle,
+        "build_observation_points",
+        lambda *_: (np.array([[[0.0, 0.0, -1.0]]]), np.array([0.0])),
+    )
+    monkeypatch.setattr(
+        infinite_baffle,
+        "resolve_assembly_backend",
+        lambda *_: SimpleNamespace(
+            requested_backend="numba",
+            effective_backend="numba",
+            fallback_used=False,
+            reason=None,
+        ),
+    )
+    monkeypatch.setattr(infinite_baffle, "_operator_kwargs", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        infinite_baffle,
+        "_build_p1_to_dp0_projection",
+        lambda *_: csr_matrix(np.ones((3, 1))),
+    )
+    monkeypatch.setattr(
+        infinite_baffle,
+        "_build_neumann_data",
+        lambda *_a, **_k: SimpleNamespace(coefficients=np.array([1.0 + 0.0j])),
+    )
+    monkeypatch.setattr(
+        infinite_baffle,
+        "_restrict_neumann_to_nonzero_support",
+        lambda _grid, data: (SimpleNamespace(), data),
+    )
+    monkeypatch.setattr(
+        infinite_baffle,
+        "_evaluate_rayleigh_aperture",
+        lambda *_: np.array([1.0 + 0.0j]),
+    )
+    monkeypatch.setattr(
+        infinite_baffle,
+        "_normalized_spl_db",
+        lambda pressure, _index: np.zeros(pressure.shape, dtype=np.float64),
+    )
+    monkeypatch.setattr(
+        infinite_baffle,
+        "compute_surface_pressure_avg",
+        lambda *_: {2: 1.0 + 0.0j, 3: 2.0 + 0.0j},
+    )
+    monkeypatch.setattr(
+        bempp_api,
+        "GridFunction",
+        lambda _space, coefficients: SimpleNamespace(coefficients=coefficients),
+    )
+
+    boundary = bempp_api.operators.boundary
+    monkeypatch.setattr(
+        boundary.sparse,
+        "identity",
+        lambda *_a, **_k: MatrixOperator([[1.0]]),
+    )
+    monkeypatch.setattr(
+        boundary.helmholtz,
+        "double_layer",
+        lambda *_a, **_k: MatrixOperator([[1.5]]),
+    )
+
+    mesh = SimpleNamespace(
+        grid=SimpleNamespace(volumes=np.ones(3, dtype=np.float64)),
+        physical_tags=np.array([2, 3, TAG_APERTURE], dtype=np.int32),
+        info=MeshInfo(3, 3, {}, (np.zeros(3), np.ones(3))),
+    )
+
+    for sources, expected_tag in (
+        ({2: 0.0, 3: 1.0}, 3),
+        ({2: 0.0, 3: 0.0}, 2),
+    ):
+        p1_space = SimpleNamespace(global_dof_count=1)
+        dp0_space = SimpleNamespace(global_dof_count=3)
+        aperture_space = SimpleNamespace(global_dof_count=1)
+        spaces = iter((p1_space, dp0_space, aperture_space))
+        monkeypatch.setattr(
+            bempp_api, "function_space", lambda *_a, **_k: next(spaces)
+        )
+        single_layer_matrices = iter(([[0.0]], [[1.0]], [[1.0]]))
+        monkeypatch.setattr(
+            boundary.helmholtz,
+            "single_layer",
+            lambda *_a, **_k: MatrixOperator(next(single_layer_matrices)),
+        )
+        monkeypatch.setattr(
+            bempp_api,
+            "as_matrix",
+            lambda operator: operator.matrix,
+        )
+
+        result = infinite_baffle.run_coupled_infinite_baffle_sweep(
+            mesh,
+            np.array([1000.0]),
+            _frame(),
+            _config(velocity_sources=sources),
+        )
+
+        assert result.surface_pressure_avg is not None
+        assert result.surface_pressure_avg[2][0] != result.surface_pressure_avg[3][0]
+        assert result.impedance[0] == result.surface_pressure_avg[expected_tag][0]
 
 
 @pytest.mark.slow

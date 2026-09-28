@@ -20,6 +20,7 @@ from .config import (
     SolveConfig,
     SourceMotion,
     VelocityMode,
+    _impedance_source_tag,
     reject_unsupported_native_symmetry,
     uses_image_assembly,
 )
@@ -707,7 +708,7 @@ def solve_single_frequency(
             source_axis = infer_frame(
                 grid,
                 physical_tags,
-                source_tag=min(config.velocity_sources.keys(), default=2),
+                source_tag=_impedance_source_tag(config.velocity_sources),
                 origin_at=config.observation.origin,
                 # Without the plane the reduced-mesh PCA is quadrant-biased,
                 # and an axis picking up an x/y component makes the per-face
@@ -898,7 +899,7 @@ def solve_single_frequency(
     start = time.perf_counter()
     impedance = _compute_impedance(
         grid, p_surface, physical_tags, p1_space,
-        source_tag=min(config.velocity_sources.keys(), default=2),
+        source_tag=_impedance_source_tag(config.velocity_sources),
     )
     phase_timings["impedance_s"] = time.perf_counter() - start
 

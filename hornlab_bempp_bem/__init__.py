@@ -28,6 +28,7 @@ from .config import (
     SolveConfig,
     SourceMotion,
     VelocityMode,
+    _impedance_source_tag,
     reject_unsupported_native_symmetry,
     uses_image_assembly,
 )
@@ -203,7 +204,7 @@ def _resolve_frame(loaded: LoadedMesh, config: SolveConfig) -> ObservationFrame:
     return infer_frame(
         loaded.grid,
         loaded.physical_tags,
-        source_tag=min(config.velocity_sources.keys(), default=2),
+        source_tag=_impedance_source_tag(config.velocity_sources),
         origin_at=config.observation.origin,
         symmetry_plane=config.native_symmetry_plane,
     )
@@ -325,7 +326,7 @@ def solve_channel_basis(
     )
     _validate_velocity_source_tags(loaded.physical_tags, config.velocity_sources)
     # One frame for every channel: resolved from the full source set, before
-    # any channel restriction can move ``min(velocity_sources)`` and with it
+    # any channel restriction can change the impedance reference and with it
     # the inferred axis.
     frame = _resolve_frame(loaded, config)
 

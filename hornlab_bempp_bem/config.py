@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from math import isfinite
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal, Mapping
 
 if TYPE_CHECKING:
     import numpy as np
@@ -49,6 +49,14 @@ GROUND_PLANES = ("yz", "xz", "xy")
 VectorizationMode = Literal["auto", "novec", "vec4", "vec8", "vec16"]
 VECTORIZATION_MODES = ("auto", "novec", "vec4", "vec8", "vec16")
 _MAX_SPHERE_POINTS = 100_000
+
+
+def _impedance_source_tag(sources: Mapping[int, object]) -> int:
+    """Choose the lowest driven source tag, falling back to the lowest key."""
+    return min(
+        (tag for tag, weight in sources.items() if weight != 0),
+        default=min(sources, default=2),
+    )
 
 
 def _is_integral_value(value: object) -> bool:

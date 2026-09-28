@@ -316,6 +316,38 @@ def test_no_channels_is_bit_identical_to_the_plain_drive():
 
 
 @pytest.mark.slow
+def test_padded_source_impedance_uses_driven_tag_and_zero_fallback():
+    pytest.importorskip("bempp_cl.api")
+
+    import hornlab_bempp_bem as package
+
+    mesh = _two_way_sphere()
+    result = package.solve_frequencies(
+        mesh,
+        [1200.0],
+        _config(
+            assembly_backend="numba",
+            velocity_sources={2: 0.0, 3: 1.0},
+        ),
+    )
+    assert result.surface_pressure_avg is not None
+    assert not np.allclose(
+        result.surface_pressure_avg[2], result.surface_pressure_avg[3],
+        rtol=1.0e-10, atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        result.impedance,
+        result.surface_pressure_avg[3],
+        rtol=1.0e-10,
+        atol=1.0e-12,
+    )
+
+    from hornlab_bempp_bem.config import _impedance_source_tag
+
+    assert _impedance_source_tag({2: 0.0, 3: 0.0}) == 2
+
+
+@pytest.mark.slow
 def test_one_solve_with_channels_equals_the_sum_of_per_channel_solves():
     """The linearity the whole feature rests on, through the real assembler.
 

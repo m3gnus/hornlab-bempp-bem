@@ -162,6 +162,55 @@ def test_robin_solve_promotes_the_complete_precision_contract():
     assert result.backend_fallback_used is True
 
 
+def test_single_frequency_uses_lowest_driven_tag_and_zero_weight_fallback():
+    from hornlab_bempp_bem.bie import solve_single_frequency
+
+    grid = MagicMock()
+    grid.number_of_elements = 2
+    tags = np.array([1, 2, 3], dtype=np.int32)
+    p1_space = MagicMock()
+    dp0_space = MagicMock()
+
+    for sources, expected_tag in (
+        ({2: 0.0, 3: 1.0}, 3),
+        ({2: 0.0, 3: 0.0}, 2),
+    ):
+        with (
+            patch(
+                "hornlab_bempp_bem.bie.resolve_assembly_backend",
+                return_value=SimpleNamespace(effective_backend="numba"),
+            ),
+            patch("hornlab_bempp_bem.bie._operator_kwargs", return_value={}),
+            patch(
+                "hornlab_bempp_bem.bie._build_neumann_data",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "hornlab_bempp_bem.bie._assemble_and_solve",
+                return_value=(MagicMock(), None, True, {}),
+            ),
+            patch(
+                "hornlab_bempp_bem.bie._compute_impedance",
+                return_value=4.0 + 5.0j,
+            ) as compute_impedance,
+        ):
+            solve_single_frequency(
+                grid,
+                tags,
+                1000.0,
+                SolveConfig(
+                    assembly_backend="numba",
+                    restrict_neumann_space=False,
+                    velocity_sources=sources,
+                ),
+                p1_space=p1_space,
+                dp0_space=dp0_space,
+                closed_mesh_validated=True,
+            )
+
+        assert compute_impedance.call_args.kwargs["source_tag"] == expected_tag
+
+
 def test_single_frequency_reports_setup_core_and_impedance_phases():
     from hornlab_bempp_bem.bie import solve_single_frequency
 

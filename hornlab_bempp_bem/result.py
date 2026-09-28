@@ -40,7 +40,9 @@ class SolveResult:
     # (F, P, N_angles) — SPL in dB, normalised on-axis = 0 dB
     spl_db: NDArray[np.float64]
 
-    # (F,) — raw area-weighted average pressure on the source tag.
+    # (F,) — raw area-weighted average pressure on the lowest tag with a
+    # nonzero velocity-source weight. Zero-weight tags do not affect the
+    # reference; if all weights are zero, the lowest declared tag is used.
     # This follows hornlab-metal-bem and is not normalized to rho*c.
     impedance: NDArray[np.complex128]
 
