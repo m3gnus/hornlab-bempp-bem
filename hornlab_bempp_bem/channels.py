@@ -361,6 +361,64 @@ def synthesize_channel_pressure(
     return np.sum(pressure * weights, axis=0)
 
 
+def synthesize_channel_impedance(
+    surface_pressure_avg: Mapping[int, NDArray[np.complex128]] | None,
+    channels: Sequence[Channel],
+    velocity_sources: Mapping[int, complex],
+    frequencies_hz: NDArray[np.float64],
+    *,
+    corrections: NDArray[np.float64] | None = None,
+    basis_channels: Sequence[Channel] | None = None,
+) -> NDArray[np.complex128]:
+    """Impedance of the combined drive, from its synthesized surface pressure.
+
+    ``impedance`` is the surface pressure averaged over the lowest tag with a
+    nonzero drive, so it is not linear across channels: each channel's own
+    impedance references that channel's own driven tag, and summing them would
+    mix averages over different surfaces. The per-tag surface pressure *is*
+    linear, so ``surface_pressure_avg`` here is the already-synthesized
+    ``tag -> (F,)`` combined average, and this picks, per frequency, the tag the
+    combined solve itself would reference -- the lowest tag whose resolved
+    drive (including any ``corrections``) is nonzero, falling back to the
+    lowest key when every drive is zero.
+
+    ``basis_channels`` are the channels a basis was solved with, whose per-tag
+    gains are baked into that basis; ``channels`` then only supply the drive
+    coefficient, exactly as in ``synthesize_channel_pressure``. Without it the
+    gains come from ``channels`` themselves.
+
+    Frequencies whose reference tag has no surface pressure, and every
+    frequency when ``surface_pressure_avg`` is ``None``, are NaN rather than a
+    mixture of per-channel impedances.
+    """
+    from .config import _impedance_source_tag
+
+    frequencies = np.asarray(frequencies_hz, dtype=np.float64)
+    impedance = np.full(frequencies.shape[0], np.nan + 1j * np.nan, dtype=np.complex128)
+    if surface_pressure_avg is None:
+        return impedance
+    gain_sources = channels if basis_channels is None else basis_channels
+    if len(gain_sources) != len(channels):
+        raise ValueError(
+            f"{len(channels)} channels given for a basis of {len(gain_sources)}"
+        )
+    for index, frequency in enumerate(frequencies):
+        drives: dict[int, complex] = {}
+        for channel_index, (channel, basis_channel) in enumerate(
+            zip(channels, gain_sources)
+        ):
+            coefficient = channel.drive(float(frequency))
+            if corrections is not None:
+                coefficient *= float(corrections[channel_index, index])
+            for tag, gain in basis_channel.sources.items():
+                drives[tag] = complex(velocity_sources[tag]) * gain * coefficient
+        tag = _impedance_source_tag(drives)
+        values = surface_pressure_avg.get(tag)
+        if values is not None:
+            impedance[index] = complex(np.asarray(values)[index])
+    return impedance
+
+
 def flat_target_corrections(
     channel_pressure: NDArray[np.complex128],
     *,
@@ -396,6 +454,7 @@ __all__ = [
     "butterworth_response",
     "flat_target_corrections",
     "resolve_channel_drives",
+    "synthesize_channel_impedance",
     "synthesize_channel_pressure",
     "validate_channels",
 ]

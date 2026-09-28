@@ -200,11 +200,115 @@ def test_synthesis_rejects_mismatched_shapes():
         synthesize_channel_pressure(basis, channels, np.zeros(5))
 
 
+def _fake_basis(channels, velocity_sources, *, with_surface=True):
+    """A ChannelBasisResult with random per-channel rows and no solve behind it.
+
+    Each channel's ``impedance`` row is what a real basis solve stores: that
+    channel's own surface pressure on its own lowest driven tag.
+    """
+    from hornlab_bempp_bem.result import ChannelBasisResult, MeshInfo
+
+    rng = np.random.default_rng(11)
+    frequencies = np.array([300.0, 1500.0, 6000.0])
+    shape = (len(channels), frequencies.size)
+
+    def draw(*extra):
+        return rng.normal(size=shape + extra) + 1j * rng.normal(size=shape + extra)
+
+    surface = {tag: draw() for tag in sorted(velocity_sources)}
+    impedance = np.stack(
+        [surface[min(channel.sources)][index] for index, channel in enumerate(channels)],
+        axis=0,
+    )
+    return ChannelBasisResult(
+        channel_names=tuple(channel.name for channel in channels),
+        channels=tuple(channels),
+        frequencies_hz=frequencies,
+        pressure_complex=draw(1, 4),
+        impedance=impedance,
+        observation_angles_deg=np.array([0.0, 30.0, 60.0, 90.0]),
+        observation_points=np.zeros((1, 4, 3)),
+        observation_planes=["horizontal"],
+        config=SolveConfig(
+            velocity_sources=dict(velocity_sources), channels=list(channels),
+        ),
+        mesh_info=MeshInfo(0, 0, {}, (np.zeros(3), np.zeros(3))),
+        surface_pressure_avg=surface if with_surface else None,
+    )
+
+
+def _weighted_surface(basis, tag, channels=None):
+    channels = basis.channels if channels is None else channels
+    drives = np.stack(
+        [channel.drive(basis.frequencies_hz) for channel in channels], axis=0,
+    )
+    return np.sum(drives * basis.surface_pressure_avg[tag], axis=0)
+
+
+def test_synthesized_impedance_is_the_combined_surface_pressure_on_the_driven_tag():
+    """Per-channel impedances reference different tags and must not be summed.
+
+    Both channels drive at every frequency, so the combined drive's reference
+    is tag 2 -- and the right answer is the synthesized tag-2 pressure, which
+    includes the pressure the high channel induces on tag 2. Summing the rows
+    would instead add the high channel's tag-3 average.
+    """
+    channels = _crossed_channels()
+    basis = _fake_basis(channels, _SOURCES)
+    synthesized = basis.synthesize()
+
+    expected = _weighted_surface(basis, 2)
+    np.testing.assert_allclose(synthesized.impedance, expected, rtol=1e-12)
+    np.testing.assert_allclose(
+        synthesized.impedance, synthesized.surface_pressure_avg[2], rtol=1e-12,
+    )
+    naive = synthesize_channel_pressure(
+        basis.impedance, channels, basis.frequencies_hz,
+    )
+    assert np.abs(naive - expected).min() > 1e-3
+
+    # A retuned crossover keeps the same rule.
+    retuned = [
+        Channel("lf", [2], level_db=-3.0),
+        Channel("hf", [3], polarity=-1, delay_ms=0.2),
+    ]
+    np.testing.assert_allclose(
+        basis.synthesize(retuned).impedance,
+        _weighted_surface(basis, 2, retuned),
+        rtol=1e-12,
+    )
+
+
+def test_synthesized_impedance_skips_a_zero_drive_channel_and_needs_surface_data():
+    channels = [Channel("lf", {2: 0.0}), Channel("hf", [3], level_db=2.0)]
+    basis = _fake_basis(channels, _SOURCES)
+    # Tag 2 is present but undriven, so the combined drive references tag 3.
+    np.testing.assert_allclose(
+        basis.synthesize().impedance, _weighted_surface(basis, 3), rtol=1e-12,
+    )
+
+    # Without per-tag surface pressure there is nothing correct to return, so
+    # the impedance is NaN instead of a mixture of per-channel references.
+    blind = _fake_basis(_crossed_channels(), _SOURCES, with_surface=False)
+    assert np.all(np.isnan(blind.synthesize().impedance))
+
+
 # ---------------------------------------------------------------------------
 # Through the solver
 # ---------------------------------------------------------------------------
 
+_ASSEMBLY_BACKEND = "opencl"
+
+
 def _require_bempp_cpu():
+    """Use the OpenCL CPU runtime where there is one, numba otherwise.
+
+    macOS has no CPU OpenCL device at all, so skipping there left every solve
+    below unexercised on the machines most development happens on. The
+    assertions are about linearity and the impedance reference, which do not
+    depend on the assembler, so numba is a sound stand-in.
+    """
+    global _ASSEMBLY_BACKEND
     try:
         import bempp_cl.api  # noqa: F401
     except Exception as exc:  # pragma: no cover - depends on env
@@ -213,8 +317,9 @@ def _require_bempp_cpu():
         from hornlab_bempp_bem import configure_opencl
 
         configure_opencl("cpu")
-    except Exception as exc:  # pragma: no cover - depends on env
-        pytest.skip(f"OpenCL CPU runtime unavailable: {exc}")
+        _ASSEMBLY_BACKEND = "opencl"
+    except Exception:  # pragma: no cover - depends on env
+        _ASSEMBLY_BACKEND = "numba"
 
 
 _SOLVE_FREQUENCIES = np.array([400.0, 1200.0, 3500.0])
@@ -278,7 +383,7 @@ def _config(**overrides):
         velocity_sources=dict(_SOURCES),
         solver=LinearSolver.LU,
         precision="double",
-        assembly_backend="opencl",
+        assembly_backend=_ASSEMBLY_BACKEND,
         observation=_observation(),
     )
     base.update(overrides)
@@ -363,8 +468,10 @@ def test_one_solve_with_channels_equals_the_sum_of_per_channel_solves():
 
     total = np.zeros_like(combined.pressure_complex)
     total_impedance = np.zeros_like(combined.impedance)
+    total_surface = {tag: np.zeros_like(combined.impedance) for tag in _SOURCES}
     for channel in channels:
         pressure_rows, impedance_rows = [], []
+        surface_rows = {tag: [] for tag in _SOURCES}
         for frequency in _SOLVE_FREQUENCIES:
             weight = channel.drive(float(frequency))
             driven = {
@@ -381,12 +488,43 @@ def test_one_solve_with_channels_equals_the_sum_of_per_channel_solves():
             )
             pressure_rows.append(one.pressure_complex[0])
             impedance_rows.append(one.impedance[0])
+            for tag in _SOURCES:
+                surface_rows[tag].append(one.surface_pressure_avg[tag][0])
         total += np.stack(pressure_rows, axis=0)
         total_impedance += np.asarray(impedance_rows)
+        for tag in _SOURCES:
+            total_surface[tag] += np.asarray(surface_rows[tag])
 
     relative = np.abs(combined.pressure_complex - total) / np.abs(total)
     assert relative.max() < 1.0e-10, relative.max()
-    assert np.abs(combined.impedance - total_impedance).max() < 1.0e-14
+
+    # The per-tag surface pressure superposes like the field does ...
+    for tag in _SOURCES:
+        relative = (
+            np.abs(combined.surface_pressure_avg[tag] - total_surface[tag])
+            / np.abs(total_surface[tag])
+        )
+        assert relative.max() < 1.0e-10, (tag, relative.max())
+
+    # ... but impedance does not: it is the combined surface pressure on the
+    # combined drive's own lowest driven tag, while each per-channel solve
+    # references its own channel's tag.
+    from hornlab_bempp_bem.config import _impedance_source_tag
+
+    expected = np.array([
+        combined.surface_pressure_avg[
+            _impedance_source_tag(
+                resolve_channel_drives(channels, _SOURCES, frequency)
+            )
+        ][index]
+        for index, frequency in enumerate(_SOLVE_FREQUENCIES)
+    ])
+    np.testing.assert_allclose(combined.impedance, expected, rtol=1.0e-12)
+    relative = np.abs(combined.impedance - total_surface[2]) / np.abs(total_surface[2])
+    assert relative.max() < 1.0e-10, relative.max()
+    assert (
+        np.abs(combined.impedance - total_impedance) / np.abs(combined.impedance)
+    ).max() > 1.0e-3
 
 
 @pytest.mark.slow
@@ -412,7 +550,14 @@ def test_channel_basis_resynthesizes_the_combined_solve_and_retunes_for_free():
     )
     assert relative.max() < 1.0e-10, relative.max()
     assert np.abs(synthesized.spl_db - combined.spl_db).max() < 1.0e-9
-    assert np.abs(synthesized.impedance - combined.impedance).max() < 1.0e-14
+    relative = (
+        np.abs(synthesized.impedance - combined.impedance)
+        / np.abs(combined.impedance)
+    )
+    assert relative.max() < 1.0e-10, relative.max()
+    np.testing.assert_allclose(
+        synthesized.impedance, synthesized.surface_pressure_avg[2], rtol=1.0e-12,
+    )
 
     # A different crossover, re-summed from the SAME basis, must match a fresh
     # solve at that setting. This is the whole point of the basis.
@@ -431,6 +576,10 @@ def test_channel_basis_resynthesizes_the_combined_solve_and_retunes_for_free():
     relative = (
         np.abs(resynthesized.pressure_complex - fresh.pressure_complex)
         / np.abs(fresh.pressure_complex)
+    )
+    assert relative.max() < 1.0e-10, relative.max()
+    relative = (
+        np.abs(resynthesized.impedance - fresh.impedance) / np.abs(fresh.impedance)
     )
     assert relative.max() < 1.0e-10, relative.max()
 

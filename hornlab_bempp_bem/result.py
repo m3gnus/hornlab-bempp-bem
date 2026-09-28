@@ -101,7 +101,10 @@ class ChannelBasisResult:
 
     # (C, F, P, N_angles) complex pressure per channel at unit channel drive.
     pressure_complex: NDArray[np.complex128]
-    # (C, F) raw area-weighted source pressure per channel at unit drive.
+    # (C, F) raw area-weighted source pressure per channel at unit drive,
+    # each on that channel's own lowest driven tag. The rows reference
+    # different surfaces, so they are NOT summable; ``synthesize`` derives the
+    # combined impedance from ``surface_pressure_avg`` instead.
     impedance: NDArray[np.complex128]
 
     observation_angles_deg: NDArray[np.float64]
@@ -143,7 +146,11 @@ class ChannelBasisResult:
         angle of the first observation plane, which is where BEAT's default
         ``flat_target_reference_angle_deg=0`` lands.
         """
-        from .channels import flat_target_corrections, synthesize_channel_pressure
+        from .channels import (
+            flat_target_corrections,
+            synthesize_channel_impedance,
+            synthesize_channel_pressure,
+        )
         from .sweep import _normalized_spl_db
 
         channels = tuple(self.channels if channels is None else channels)
@@ -168,10 +175,6 @@ class ChannelBasisResult:
             self.pressure_complex, channels, self.frequencies_hz,
             corrections=corrections,
         )
-        impedance = synthesize_channel_pressure(
-            self.impedance, channels, self.frequencies_hz,
-            corrections=corrections,
-        )
         sphere = None
         if self.sphere_pressure_complex is not None:
             sphere = synthesize_channel_pressure(
@@ -187,6 +190,14 @@ class ChannelBasisResult:
                 )
                 for tag, values in self.surface_pressure_avg.items()
             }
+        # Not a sum of the per-channel ``impedance`` rows: each row references
+        # its own channel's driven tag. The combined drive's reference tag is
+        # read from the synthesized per-tag surface pressure instead.
+        impedance = synthesize_channel_impedance(
+            surface, channels, self.config.velocity_sources,
+            self.frequencies_hz, corrections=corrections,
+            basis_channels=self.channels,
+        )
         on_axis = int(np.argmin(np.abs(self.observation_angles_deg)))
         return SolveResult(
             frequencies_hz=self.frequencies_hz,
