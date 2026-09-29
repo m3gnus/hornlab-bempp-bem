@@ -147,28 +147,34 @@ def _setup_function_spaces(grid):
     return p1, dp0
 
 
+_SYMMETRY_PLANE_NORMALS = {"yz": (1.0, 0.0, 0.0), "xz": (0.0, 1.0, 0.0), "xy": (0.0, 0.0, 1.0)}
+
+
 def _build_axial_element_scale(
     grid,
     physical_tags: NDArray[np.int32],
     source_tags,
-    axis: NDArray[np.float64],
+    axis: NDArray[np.float64] | None,
+    source_axes=None,
+    native_symmetry_plane: str | None = None,
 ) -> NDArray | None:
     """Per-element ``n_hat . axis`` projection for a rigid axial (piston) source.
 
-    ``axis`` is the resolved observation-frame axis shared by every source tag.
-    Each tag gets one area-weighted sign vote so its drive remains
-    outward-positive, while the per-face projection retains the frame-relative
-    cosine used by hornlab-metal-bem. Returns ``None`` for a degenerate axis or
-    when no configured source face is present.
-    """
-    axis = np.asarray(axis, dtype=np.float64).reshape(-1)
-    if axis.shape[0] != 3:
-        return None
-    axis_norm = float(np.linalg.norm(axis))
-    if not np.isfinite(axis_norm) or axis_norm <= 1e-12:
-        return None
-    axis = axis / axis_norm
+    Legacy path (``source_axes is None``): ``axis`` is the resolved
+    observation-frame axis shared by every source tag. Each tag gets one
+    area-weighted sign vote so its drive remains outward-positive, while the
+    per-face projection retains the frame-relative cosine used by
+    hornlab-metal-bem.
 
+    Explicit path (``source_axes`` given): each tag uses its own axis, no sign
+    vote, no symmetry projection and no dependence on ``axis``; an axis
+    pointing against the faces' normals drives them negative. On a native
+    symmetry-reduced solve the axis must lie in the symmetry subspace.
+
+    Returns ``None`` only when no configured source face is present. A
+    degenerate or non-finite axis for a tag that has faces raises
+    ``ValueError`` (never a silent fall back to normal motion).
+    """
     vertices = np.asarray(grid.vertices.T, dtype=np.float64)
     elements = np.asarray(grid.elements.T, dtype=np.int32)
     n_elem = elements.shape[0]
@@ -179,6 +185,27 @@ def _build_axial_element_scale(
     raw = np.cross(p1 - p0, p2 - p0)  # outward (canonical winding); |raw| = 2*area
     mags = np.linalg.norm(raw, axis=1)
 
+    def _unit_axis(value, label: str) -> NDArray[np.float64]:
+        try:
+            vec = np.asarray(value, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError):
+            vec = np.asarray([], dtype=np.float64)
+        norm = float(np.linalg.norm(vec)) if vec.shape[0] == 3 else float("nan")
+        if vec.shape[0] != 3 or not np.isfinite(norm) or norm <= 1e-12:
+            raise ValueError(
+                f"axial source motion needs a finite, non-zero 3-vector axis "
+                f"for {label}"
+            )
+        return vec / norm
+
+    legacy_axis = None
+    sym_normals: list[tuple[float, float, float]] = []
+    if source_axes is not None and native_symmetry_plane:
+        sym_normals = [
+            _SYMMETRY_PLANE_NORMALS[name]
+            for name in str(native_symmetry_plane).split("+")
+        ]
+
     scale = np.zeros(n_elem, dtype=np.float64)
     any_source = False
     for tag in sorted({int(t) for t in source_tags}):
@@ -188,13 +215,39 @@ def _build_axial_element_scale(
         tag_mags = mags[idx]
         safe_mags = np.where(tag_mags > 1e-15, tag_mags, 1.0)
         unit_normals = raw[idx] / safe_mags[:, None]
-        projection = unit_normals @ axis
-        if float(np.dot(projection, tag_mags)) < 0.0:
-            projection = -projection
-        scale[idx] = projection
+        if source_axes is not None:
+            if tag not in source_axes:
+                raise ValueError(f"source_axes is missing source tag {tag}")
+            tag_axis = _unit_axis(source_axes[tag], f"source tag {tag}")
+            for normal in sym_normals:
+                if abs(float(np.dot(tag_axis, normal))) > 1e-9:
+                    raise ValueError(
+                        f"axis of source tag {tag} is not in the symmetry "
+                        "subspace; solve the full model"
+                    )
+            scale[idx] = unit_normals @ tag_axis
+        else:
+            if legacy_axis is None:
+                legacy_axis = _unit_axis(axis, "the observation frame")
+            projection = unit_normals @ legacy_axis
+            if float(np.dot(projection, tag_mags)) < 0.0:
+                projection = -projection
+            scale[idx] = projection
         any_source = True
 
     return scale if any_source else None
+
+
+def _axial_scale_for_config(grid, physical_tags, config: SolveConfig, axis):
+    """Axial per-element scale for ``config`` (legacy or explicit axes)."""
+    return _build_axial_element_scale(
+        grid,
+        physical_tags,
+        config.velocity_sources.keys(),
+        axis,
+        source_axes=config.source_axes,
+        native_symmetry_plane=config.native_symmetry_plane,
+    )
 
 
 def _build_neumann_data(
@@ -314,10 +367,10 @@ def _build_neumann_coefficients(
     air_density = config.air_density
     if config.source_motion == SourceMotion.AXIAL:
         if axial_element_scale is None:
-            if grid is None or source_axis is None:
+            if grid is None or (source_axis is None and config.source_axes is None):
                 raise ValueError("axial source motion requires a grid and source_axis")
-            axial_element_scale = _build_axial_element_scale(
-                grid, physical_tags, config.velocity_sources.keys(), source_axis
+            axial_element_scale = _axial_scale_for_config(
+                grid, physical_tags, config, source_axis
             )
     for tag, weight in config.velocity_sources.items():
         if tag in excluded_tags:
@@ -699,7 +752,11 @@ def solve_single_frequency(
             "native half/quarter symmetry with Robin impedance boundaries "
             "is not implemented yet"
         )
-    if config.source_motion == SourceMotion.AXIAL and source_axis is None:
+    if (
+        config.source_motion == SourceMotion.AXIAL
+        and source_axis is None
+        and config.source_axes is None
+    ):
         if config.frame_override is not None:
             source_axis = np.asarray(config.frame_override.axis, dtype=np.float64)
         else:

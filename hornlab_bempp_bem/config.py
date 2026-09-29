@@ -242,6 +242,15 @@ class SolveConfig:
     # drives the source as a rigid piston along its axis (v_n = U*(n_hat.axis)).
     # See SourceMotion. Default "normal" leaves every existing solve unchanged.
     source_motion: str = SourceMotion.NORMAL
+    # Optional per-source axis for axial motion: {source tag: (x, y, z)} in the
+    # mesh's coordinates (normalized on use). None (default) keeps the legacy
+    # behaviour: every tag uses the observation frame axis with one
+    # area-weighted sign vote. When given, every velocity-source tag needs an
+    # entry; each face is driven at n_hat . axis_tag with NO sign vote, no
+    # symmetry projection and no dependence on the observation frame (the
+    # caller owns polarity). On a native-symmetry solve the axis must lie in
+    # the symmetry subspace.
+    source_axes: dict[int, tuple[float, float, float]] | None = None
 
     # Robin / impedance boundary condition (wall damping).
     # Maps physical tag -> normalized surface admittance β = ρc / Z_s
@@ -480,6 +489,8 @@ class SolveConfig:
                 )
         if self.source_motion not in {SourceMotion.NORMAL, SourceMotion.AXIAL}:
             raise ValueError("source_motion must be 'normal' or 'axial'")
+        if self.source_axes is not None:
+            self._validate_source_axes()
         if self.channels:
             from .channels import Channel, validate_channels
 
@@ -495,6 +506,46 @@ class SolveConfig:
                 "use hornlab-metal-bem source_velocity_profiles for shaped "
                 "source profiles"
             )
+
+    def _validate_source_axes(self) -> None:
+        if self.source_motion != SourceMotion.AXIAL:
+            raise ValueError("source_axes needs axial motion (source_motion='axial')")
+        import numpy as np
+
+        if not isinstance(self.source_axes, dict):
+            raise ValueError("source_axes must be a dict {source tag: (x, y, z)}")
+        axes: dict[int, tuple[float, float, float]] = {}
+        for key, value in self.source_axes.items():
+            if (
+                isinstance(key, bool)
+                or not _is_integral_value(key)
+                or int(key) not in {int(t) for t in self.velocity_sources}
+            ):
+                raise ValueError(
+                    f"source_axes tag {key!r} is not a velocity-source tag"
+                )
+            try:
+                vec = np.asarray(value, dtype=np.float64).reshape(-1)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"source_axes for tag {key!r} must be 3 finite numbers"
+                ) from None
+            if (
+                vec.shape[0] != 3
+                or not np.all(np.isfinite(vec))
+                or float(np.linalg.norm(vec)) <= 1e-12
+            ):
+                raise ValueError(
+                    f"source_axes for tag {key!r} must be 3 finite numbers "
+                    "with non-zero norm"
+                )
+            axes[int(key)] = (float(vec[0]), float(vec[1]), float(vec[2]))
+        for tag in self.velocity_sources:
+            if int(tag) not in axes:
+                raise ValueError(
+                    f"source_axes is missing velocity-source tag {int(tag)}"
+                )
+        self.source_axes = axes
 
 
 def uses_image_assembly(config: SolveConfig) -> bool:

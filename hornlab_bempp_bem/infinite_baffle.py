@@ -373,6 +373,8 @@ def run_coupled_infinite_baffle_sweep(
             tags,
             config.velocity_sources.keys(),
             frame.axis,
+            source_axes=config.source_axes,
+            native_symmetry_plane=config.native_symmetry_plane,
         )
 
     pressure_rows: list[NDArray[np.complex128]] = []

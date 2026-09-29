@@ -376,8 +376,10 @@ def run_sweep_serial(
         axial_element_scale = _build_axial_element_scale(
             mesh.grid,
             mesh.physical_tags,
-            source_tags,
+            config.velocity_sources.keys(),
             frame.axis,
+            source_axes=config.source_axes,
+            native_symmetry_plane=config.native_symmetry_plane,
         )
     freq_results: list[FrequencyResult] = []
     surface_pavg: dict[int, list[complex]] = {tag: [] for tag in source_tags}
@@ -897,8 +899,10 @@ def _worker_solve_chunk_inner(
         axial_element_scale = _build_axial_element_scale(
             grid,
             physical_tags,
-            source_tags,
+            config.velocity_sources.keys(),
             source_axis,
+            source_axes=config.source_axes,
+            native_symmetry_plane=config.native_symmetry_plane,
         )
     surface_pressure = {
         tag: np.zeros(len(frequencies), dtype=np.complex128)

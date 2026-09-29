@@ -308,6 +308,34 @@ through `sphere_theta_max_deg` (180° by default); phi wraps around the axis
 without a duplicate 360° column. This field is independent of the selected
 display planes and is suitable for solid-angle directivity integration.
 
+## Source Motion
+
+`SolveConfig.source_motion` selects how a driven tag's velocity maps onto its faces.
+`"normal"` (default) drives every face along its own outward normal. `"axial"` moves the
+source as a rigid piston: each face is driven at `n_hat . axis`.
+
+By default the axis is the observation frame axis and each tag gets one area-weighted sign
+vote so it drives outward. That makes the result depend on how faces are grouped into tags
+and on the plotting frame. `SolveConfig.source_axes` removes both dependencies:
+
+```python
+SolveConfig(
+    velocity_sources={2: 1.0, 3: 1.0},
+    source_motion="axial",
+    source_axes={2: (0, 0, 1), 3: (0, 0, 1)},  # one axis per source tag, mesh coordinates
+)
+```
+
+- Requires `source_motion="axial"` and an entry for every velocity-source tag; unknown tags
+  and zero or non-finite axes raise `ValueError`. Axes are normalized.
+- No sign vote: an axis against the faces' normals drives them negative. The caller owns polarity.
+- The observation frame has no influence on the drive, and there is no amplitude normalization.
+- On a native half/quarter symmetry solve the axis must already lie in the symmetry
+  subspace (no component along the normal of any active plane); otherwise `ValueError`.
+  It is never projected.
+- `source_axes=None` keeps the legacy behaviour unchanged. In both paths a degenerate or
+  non-finite axis on a tag that has faces raises instead of silently falling back to normal motion.
+
 ## Channels and Crossovers
 
 `velocity_sources` maps each physical tag to its own drive weight. `channels`
