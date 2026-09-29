@@ -103,6 +103,12 @@ jobs:
       - name: Analytic infinite-baffle gate is still present
         run: python -m pytest "tests/test_infinite_baffle.py::test_bempp_coupled_ib_matches_baffled_piston_absolute_field" --collect-only -q
 
+      # The BEMPP-only resonant deep-channel gate against the 1-D pipe reference
+      # runs in the Tests step above on every leg (numba CPU, no Metal). Assert
+      # it is still collected: a renamed or deleted node fails with exit 4.
+      - name: Resonant pipe-reference gate is still present
+        run: python -m pytest "tests/test_infinite_baffle.py::test_bempp_coupled_ib_resonant_channel_matches_pipe_reference" --collect-only -q
+
       # On macOS and Windows these skip on the device probe, for the same
       # reason and with the same blind spot. On Linux pocl makes them run, so
       # there the step is a tautology and costs a second.

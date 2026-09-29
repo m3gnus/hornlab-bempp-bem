@@ -14,6 +14,7 @@ from hornlab_bempp_bem.infinite_baffle import _validate_coupled_infinite_baffle
 from hornlab_bempp_bem.mesh import LoadedMesh, MeshError, _resolve_coupled_ib_aperture_tag
 from hornlab_bempp_bem.observation import ObservationFrame
 from hornlab_bempp_bem.result import MeshInfo
+from ib_pipe_reference import pipe_on_axis_pressure
 
 TAG_THROAT = 2
 TAG_WALL = 3
@@ -443,6 +444,30 @@ def _metal_engine_or_skip():
             "Swift/Metal native helper unavailable: "
             + "; ".join(status.unavailable_reasons)
         )
+    # Freshness guard, equivalent to hornlab-metal-bem's tests/native_helper_guard.py
+    # (which is not installed with the package): a helper built from a source tree
+    # that has since changed would validate the previous build. Applies only to the
+    # in-tree swift-package helper; an installed wheel or an explicitly chosen
+    # helper is the caller's responsibility and is not checked.
+    if status.helper_source == "swift-package":
+        helper = status.helper_executable_path
+        package_dir = status.native_package_dir
+        newer = [
+            path.name
+            for path in (
+                *sorted((package_dir / "Sources").rglob("*.swift")),
+                package_dir / "Package.swift",
+            )
+            if path.is_file()
+            and path.stat().st_mtime > helper.stat().st_mtime + 2.0
+        ]
+        if newer:
+            pytest.fail(
+                f"hornlab-metal-bem helper {helper} is older than "
+                f"{', '.join(newer)}; run `swift build -c release` in {package_dir} "
+                "(and `touch` the helper if nothing relinks) before trusting this test",
+                pytrace=False,
+            )
     return metal_bem
 
 
@@ -546,3 +571,132 @@ def test_bempp_and_metal_coupled_ib_agree_on_the_same_resonant_channel():
     phase_deg = np.abs(np.degrees(np.angle(ratio)))
     assert float(level_db.max()) < 0.02, level_db
     assert float(phase_deg.max()) < 0.3, phase_deg
+
+
+# ---------------------------------------------------------------------------
+# BEMPP-only resonant deep-channel gate against the 1-D pipe + King baffled-piston
+# reference in ib_pipe_reference.py (a copy of hornlab-metal-bem's
+# tests/ib_pipe_reference.py; the two gates and their limits are kept in sync,
+# see that module's docstring). No Metal dependency: this runs on the numba CPU
+# assembly, so every CI leg exercises it.
+#
+# Fixture: 40 mm radius, 100 mm deep channel, 4 rings x 24 sectors x 10 wall
+# layers (816 triangles), unit throat velocity, on-axis point 1.5 m from the
+# mouth, 300 Hz - 2.2 kHz (ka <= 1.6). Measured against the reference on this
+# mesh (numba, double precision): 0.64 dB level, 4.3 deg phase away from and
+# 8.0 deg within 600-700 Hz, resonance +6.0 Hz (0.6 % above the reference: the
+# model gap between the exact solver and a uniform-mouth-velocity, plane-wave-only
+# reference), peak level -0.07 dB. That equals the Metal engine on the same mesh
+# to 0.001 dB, and the 10/15/22-layer mesh study in hornlab-metal-bem shows the
+# gap is converged (mesh-to-mesh <= 0.10 dB / 0.5 deg).
+#
+# Limits, identical to the Metal gate and each 1.5-2 times the converged gap:
+# level 1.0 dB, phase 8 deg off resonance (measured 4.3) and 12 deg within
+# 600-700 Hz (measured 8.0, where 6 Hz of shift is several degrees of phase),
+# peak level 0.25 dB. The resonance limit is a window (3, 9) Hz around the
+# measured +6 Hz gap rather than +/-12 Hz around zero, so a resonance error of
+# about 0.5 % in either direction fails.
+_PIPE_RADIUS_M = 0.04
+_PIPE_DEPTH_M = 0.10
+_PIPE_DISTANCE_M = 1.5
+_PIPE_AIR_DENSITY = 1.2041
+_PIPE_BAND_HZ = np.arange(300.0, 2200.1, 100.0)
+_PIPE_RESONANCE_SCAN_HZ = np.arange(628.0, 684.1, 4.0)
+_PIPE_RESONANCE_BAND_HZ = (600.0, 700.0)
+_PIPE_RESONANCE_OFFSET_HZ = (3.0, 9.0)
+_PIPE_PEAK_LEVEL_TOL_DB = 0.25
+_PIPE_LEVEL_TOL_DB = 1.0
+_PIPE_PHASE_TOL_DEG = 8.0
+_PIPE_PHASE_TOL_RESONANCE_DEG = 12.0
+
+
+def _pipe_reference(frequencies_hz: np.ndarray, *, depth: float = _PIPE_DEPTH_M):
+    return pipe_on_axis_pressure(
+        frequencies_hz,
+        radius=_PIPE_RADIUS_M,
+        depth=depth,
+        distance=_PIPE_DISTANCE_M,
+        rho=_PIPE_AIR_DENSITY,
+        c=SPEED_OF_SOUND,
+    )
+
+
+def _pipe_resonance_peak(
+    frequencies_hz: np.ndarray, pressure: np.ndarray
+) -> tuple[float, float]:
+    """Peak frequency (three-point parabola on log |p|) and level in dB, 600-700 Hz.
+
+    NaN when the maximum sits on the edge of the scan (no resonance found).
+    """
+    lo, hi = _PIPE_RESONANCE_BAND_HZ
+    mask = (frequencies_hz >= lo) & (frequencies_hz <= hi)
+    f = frequencies_hz[mask]
+    y = np.log(np.abs(pressure[mask]))
+    i = int(np.argmax(y))
+    if not 0 < i < f.size - 1:
+        return float("nan"), float("nan")
+    a, b, c = np.polyfit(f[i - 1 : i + 2] - f[i], y[i - 1 : i + 2], 2)
+    return (
+        float(f[i] - b / (2.0 * a)),
+        float(20.0 * np.log10(np.e) * (c - b * b / (4.0 * a))),
+    )
+
+
+def _pipe_gap(
+    frequencies_hz: np.ndarray, pressure: np.ndarray, reference: np.ndarray
+) -> dict[str, float]:
+    ratio = pressure / reference
+    level_db = 20.0 * np.log10(np.abs(ratio))
+    phase_deg = np.degrees(np.angle(ratio))
+    lo, hi = _PIPE_RESONANCE_BAND_HZ
+    in_band = (frequencies_hz >= lo) & (frequencies_hz <= hi)
+    peak_f, peak_db = _pipe_resonance_peak(frequencies_hz, pressure)
+    ref_f, ref_db = _pipe_resonance_peak(frequencies_hz, reference)
+    return {
+        "level_db": float(np.max(np.abs(level_db))),
+        "phase_off_resonance_deg": float(np.max(np.abs(phase_deg[~in_band]))),
+        "phase_resonance_deg": float(np.max(np.abs(phase_deg[in_band]))),
+        "resonance_hz": peak_f - ref_f,
+        "peak_level_db": peak_db - ref_db,
+    }
+
+
+def _assert_within_pipe_gate(gap: dict[str, float]) -> None:
+    low, high = _PIPE_RESONANCE_OFFSET_HZ
+    assert low < gap["resonance_hz"] < high, gap
+    assert abs(gap["peak_level_db"]) < _PIPE_PEAK_LEVEL_TOL_DB, gap
+    assert gap["level_db"] < _PIPE_LEVEL_TOL_DB, gap
+    assert gap["phase_off_resonance_deg"] < _PIPE_PHASE_TOL_DEG, gap
+    assert gap["phase_resonance_deg"] < _PIPE_PHASE_TOL_RESONANCE_DEG, gap
+
+
+@pytest.mark.slow
+def test_bempp_coupled_ib_resonant_channel_matches_pipe_reference():
+    """BEMPP alone: resonance frequency, level and phase of the deep channel vs the 1-D pipe.
+
+    Numba CPU assembly, no Metal dependency. Fails on a resonance shifted by about
+    0.5 % or more either way, a 1 dB level error, or an 8 deg phase error, which the
+    shallow-piston tests above cannot see (they use a 4 mm channel).
+    """
+    frequencies = np.unique(np.concatenate([_PIPE_BAND_HZ, _PIPE_RESONANCE_SCAN_HZ]))
+    mesh = _channel_mesh(
+        _PIPE_RADIUS_M, _PIPE_DEPTH_M, rings=4, sectors=24, wall_layers=10
+    )
+    config = _config(
+        frame_override=_frame(_PIPE_DEPTH_M),
+        formulation="standard",
+        observation=ObservationConfig(
+            planes=["horizontal"],
+            distance_m=_PIPE_DISTANCE_M,
+            angle_min_deg=0.0,
+            angle_max_deg=90.0,
+            angle_count=2,
+        ),
+    )
+    assert config.air_density == pytest.approx(_PIPE_AIR_DENSITY)
+    result = bempp_bem.solve_frequencies(mesh, frequencies, config)
+    assert all(
+        entry["native_diagnostics"]["coupled_ib"] is True for entry in result.solver_log
+    )
+    pressure = result.pressure_complex[:, 0, 0]
+    _assert_within_pipe_gate(_pipe_gap(frequencies, pressure, _pipe_reference(frequencies)))
