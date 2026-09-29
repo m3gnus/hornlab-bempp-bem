@@ -21,6 +21,7 @@ from .backends import (
     resolve_assembly_backend,
 )
 from .channels import Channel, Crossover
+from .capabilities import CAPABILITY_SCHEMA_VERSION, REQUEST_SCHEMA_VERSION, capabilities
 from .config import (
     BIEFormulation,
     LinearSolver,
@@ -57,6 +58,7 @@ __all__ = [
     "AssemblyBackendResolution",
     "AssemblyBackendUnavailable",
     "BIEFormulation",
+    "CAPABILITY_SCHEMA_VERSION",
     "Channel",
     "ChannelBasisResult",
     "Crossover",
@@ -68,10 +70,12 @@ __all__ = [
     "ObservationFrame",
     "OpenCLCheck",
     "OpenCLError",
+    "REQUEST_SCHEMA_VERSION",
     "SolveConfig",
     "SolveResult",
     "SourceMotion",
     "VelocityMode",
+    "capabilities",
     "check_opencl",
     "configure_opencl",
     "evaluate_exterior_from_traces",
