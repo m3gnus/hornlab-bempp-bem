@@ -72,7 +72,9 @@ def _channel_mesh(
     *,
     rings: int = 2,
     sectors: int = 12,
+    wall_layers: int = 1,
 ) -> LoadedMesh:
+    """Straight circular channel; ``wall_layers`` element bands along the wall."""
     import bempp_cl.api as bempp_api
 
     top_vertices, top_triangles = _triangulated_disc(
@@ -89,8 +91,19 @@ def _channel_mesh(
         z=-depth,
         normal_sign=-1,
     )
-    vertices = np.vstack([top_vertices, bottom_vertices])
     bottom_offset = top_vertices.shape[0]
+    theta = 2.0 * np.pi * np.arange(sectors) / sectors
+    middle_rings = [
+        np.column_stack(
+            [
+                radius * np.cos(theta),
+                radius * np.sin(theta),
+                np.full(sectors, -depth + depth * layer / wall_layers),
+            ]
+        )
+        for layer in range(1, wall_layers)
+    ]
+    vertices = np.vstack([top_vertices, bottom_vertices, *middle_rings])
     triangles = [*top_triangles.tolist()]
     tags = [TAG_APERTURE] * top_triangles.shape[0]
     triangles.extend((bottom_triangles + bottom_offset).tolist())
@@ -98,14 +111,25 @@ def _channel_mesh(
 
     top_outer = 1 + (rings - 1) * sectors
     bottom_outer = bottom_offset + top_outer
-    for sector in range(sectors):
-        nxt = (sector + 1) % sectors
-        top0, top1 = top_outer + sector, top_outer + nxt
-        bottom0, bottom1 = bottom_outer + sector, bottom_outer + nxt
-        triangles.extend(
-            ([bottom0, bottom1, top1], [bottom0, top1, top0])
-        )
-        tags.extend((TAG_WALL, TAG_WALL))
+    middle_start = bottom_offset + bottom_vertices.shape[0]
+    # Outer-ring vertex indices from the throat (z=-depth) up to the mouth (z=0).
+    ring_indices = [bottom_outer + np.arange(sectors)]
+    ring_indices.extend(
+        middle_start + layer * sectors + np.arange(sectors)
+        for layer in range(wall_layers - 1)
+    )
+    ring_indices.append(top_outer + np.arange(sectors))
+    for layer in range(wall_layers):
+        lower, upper = ring_indices[layer], ring_indices[layer + 1]
+        for sector in range(sectors):
+            nxt = (sector + 1) % sectors
+            triangles.extend(
+                (
+                    [lower[sector], lower[nxt], upper[nxt]],
+                    [lower[sector], upper[nxt], upper[sector]],
+                )
+            )
+            tags.extend((TAG_WALL, TAG_WALL))
 
     # Reverse the closed shell so every normal points into the acoustic cavity;
     # in particular, the aperture normal is -Z.
@@ -401,3 +425,124 @@ def test_bempp_coupled_ib_impedance_matches_baffled_piston(frequency: float):
     # Source pressure includes the 4 mm channel and coarse mesh bias.
     assert result.impedance[0].real == pytest.approx(resistance, rel=0.30)
     assert result.impedance[0].imag == pytest.approx(reactance, rel=0.30)
+
+
+def _metal_engine_or_skip():
+    """Return the Metal engine module, or skip when it cannot run here.
+
+    hornlab-metal-bem is not a dependency of this package. The test needs it
+    importable and its Swift/Metal helper runnable (Apple Silicon with a built
+    helper); on every other host it skips.
+    """
+    metal_bem = pytest.importorskip("hornlab_metal_bem")
+    from hornlab_metal_bem.metal import discover_native_runtime
+
+    status = discover_native_runtime(run_smoke_test=True)
+    if not status.available:
+        pytest.skip(
+            "Swift/Metal native helper unavailable: "
+            + "; ".join(status.unavailable_reasons)
+        )
+    return metal_bem
+
+
+@pytest.mark.slow
+def test_bempp_and_metal_coupled_ib_agree_on_the_same_resonant_channel():
+    """Two independent engines, one mesh: the resonant deep channel must agree.
+
+    Fixture: 40 mm radius, 100 mm deep straight channel, 6 rings x 36 sectors and
+    15 wall layers (1872 triangles), unit throat velocity, on-axis and off-axis
+    points 1.5 m from the mouth, at and around the first resonance (about 650 Hz)
+    and up to 2 kHz. Both engines use the standard formulation (real k) in double
+    precision. Measured agreement on this mesh: 0.0002 dB and 0.0006 deg against
+    the current Metal helper (0.0005 dB / 0.003 deg against the older installed
+    0.1.0 helper; the earlier probe saw 0.01 dB / 0.1 deg with a coarser
+    frequency set). The limits below (0.02 dB, 0.3 deg) leave two orders of
+    margin for GPU float32 noise on other machines, and still fail on a 7.5 %
+    aperture-coupling error in Metal (measured 0.74 dB / 15 deg) or a halved one
+    (6.1 dB / 80 deg). They are far below the 0.6 dB / 7 deg gap either engine
+    has against the 1-D pipe reference (see hornlab-metal-bem
+    tests/test_native_coupled_ib_validation.py), so that gap does not hide here.
+    """
+    metal_bem = _metal_engine_or_skip()
+    from hornlab_metal_bem.config import ObservationConfig as MetalObservation
+    from hornlab_metal_bem.config import SolveConfig as MetalSolveConfig
+    from hornlab_metal_bem.config import VelocityMode as MetalVelocityMode
+    from hornlab_metal_bem.mesh import LoadedMesh as MetalMesh
+    from hornlab_metal_bem.mesh import make_pure_grid
+    from hornlab_metal_bem.observation import ObservationFrame as MetalFrame
+    from hornlab_metal_bem.result import MeshInfo as MetalMeshInfo
+
+    depth = 0.10
+    frequencies = [300.0, 640.0, 650.0, 659.0, 670.0, 1000.0, 1500.0, 2000.0]
+    bempp_mesh = _channel_mesh(0.04, depth, rings=6, sectors=36, wall_layers=15)
+    vertices = np.asarray(bempp_mesh.grid.vertices, dtype=np.float64).T.copy()
+    elements = np.asarray(bempp_mesh.grid.elements, dtype=np.int32).T.copy()
+    metal_mesh = MetalMesh(
+        grid=make_pure_grid(vertices, elements),
+        physical_tags=np.asarray(bempp_mesh.physical_tags, dtype=np.int32),
+        info=MetalMeshInfo(
+            n_vertices=vertices.shape[0],
+            n_triangles=elements.shape[0],
+            physical_groups={
+                TAG_THROAT: "throat",
+                TAG_WALL: "wall",
+                TAG_APERTURE: "aperture",
+            },
+            bounding_box_m=(vertices.min(axis=0), vertices.max(axis=0)),
+        ),
+    )
+    origin = np.zeros(3, dtype=np.float64)
+    metal_frame = MetalFrame(
+        axis=np.array([0.0, 0.0, 1.0]),
+        origin=origin,
+        u=np.array([1.0, 0.0, 0.0]),
+        v=np.array([0.0, 1.0, 0.0]),
+        mouth_center=origin,
+        source_center=np.array([0.0, 0.0, -depth]),
+    )
+    metal_config = MetalSolveConfig(
+        velocity_sources={TAG_THROAT: 1.0},
+        velocity_mode=MetalVelocityMode.VELOCITY,
+        aperture_tag=TAG_APERTURE,
+        observation=MetalObservation(
+            distance_m=1.5,
+            angle_min_deg=0.0,
+            angle_max_deg=90.0,
+            angle_count=4,
+            planes=["horizontal"],
+            origin="mouth",
+        ),
+        frame_override=metal_frame,
+        formulation="standard",
+        metal_native_assembly_mode="corrected",
+        dense_solve_dtype="float64",
+    )
+    bempp_config = _config(
+        frame_override=_frame(depth),
+        formulation="standard",
+        observation=ObservationConfig(
+            planes=["horizontal"],
+            distance_m=1.5,
+            angle_min_deg=0.0,
+            angle_max_deg=90.0,
+            angle_count=4,
+        ),
+    )
+
+    metal_result = metal_bem.solve_frequencies(metal_mesh, frequencies, metal_config)
+    bempp_result = bempp_bem.solve_frequencies(bempp_mesh, frequencies, bempp_config)
+
+    assert all(e.get("coupled_ib") is True for e in metal_result.native_diagnostics)
+    assert all(
+        entry["native_diagnostics"]["coupled_ib"] is True
+        for entry in bempp_result.solver_log
+    )
+    metal_p = metal_result.pressure_complex
+    bempp_p = bempp_result.pressure_complex
+    assert metal_p.shape == bempp_p.shape == (len(frequencies), 1, 4)
+    ratio = bempp_p / metal_p
+    level_db = np.abs(20.0 * np.log10(np.abs(ratio)))
+    phase_deg = np.abs(np.degrees(np.angle(ratio)))
+    assert float(level_db.max()) < 0.02, level_db
+    assert float(phase_deg.max()) < 0.3, phase_deg
