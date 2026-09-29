@@ -224,10 +224,11 @@ def test_bigmeh_cabinet_multiple_source_elements():
     ])
     vertices = np.vstack([src_disc_1, src_disc_2, front_verts])
 
-    # Source tris (winding chosen so normals point +y)
+    # Source tris (winding chosen so normals point +y; the tagged winding is
+    # authoritative, so a -y winding here would mean a rear-firing cabinet)
     src_elems = np.array([
-        [0, 1, 2], [0, 2, 3],
-        [4, 5, 6], [4, 6, 7],
+        [0, 2, 1], [0, 3, 2],
+        [4, 6, 5], [4, 7, 6],
     ])
     body_elems = np.array([[8, 9, 10], [8, 10, 11]])
     elements = np.vstack([src_elems, body_elems])
