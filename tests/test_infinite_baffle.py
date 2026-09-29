@@ -721,34 +721,58 @@ def test_bempp_coupled_ib_resonant_channel_matches_pipe_reference():
 
 
 @pytest.mark.slow
-def test_bempp_coupled_ib_shipped_options_match_pipe_reference():
+@pytest.mark.parametrize(
+    "velocity_mode", [VelocityMode.VELOCITY, VelocityMode.ACCELERATION],
+    ids=["velocity", "acceleration"],
+)
+def test_bempp_coupled_ib_shipped_options_match_pipe_reference(velocity_mode):
     """Gate Waveguide Generator's shipped numba/standard coupled-IB options.
 
     The single-precision and adaptive settings below match WG's
     server/solver/bempp.py; its server/requirements-lock.txt pins numba 0.66.0.
     The coupled-IB implementation currently retains fixed quadrature even when
     adaptive_quadrature is enabled; this tests the options WG actually passes.
+    Keep the unit-velocity arm and exercise WG's default unit-acceleration
+    drive. Under the e^{-i omega t} convention, a = -i omega v: scale the
+    unit-velocity pipe pressure by 1/(-i omega) per frequency, matching
+    bie._build_neumann_coefficients.
 
     Measured on the 816-triangle mesh with numba 0.66.0 (35 frequencies),
-    double/fixed vs single/adaptive options respectively: maximum reference
-    level error 0.641861/0.641865 dB, off-resonance phase 4.283728/4.283735 deg,
+    unit-velocity double/fixed vs single/adaptive options respectively: maximum
+    reference level error 0.641861/0.641865 dB, off-resonance phase 4.283728/4.283735 deg,
     resonant phase 7.986815/7.986855 deg, resonance offset +5.969526/+5.969500 Hz,
     peak level error -0.071303/-0.071307 dB. Single vs double differs by at most
     0.00000685 dB / 0.0000892 deg and -0.0000261 Hz at the resonance peak.
 
+    The single/adaptive unit-acceleration arm measured maximum reference
+    level error 0.641865 dB, off-resonance phase 4.283735 deg, resonant phase
+    7.986855 deg, resonance offset +5.870333 Hz, peak level error -0.149585 dB.
+    Both peak fits use acceleration-scaled pressure; the 1/omega magnitude
+    changes their peak frequencies and levels from the velocity arm.
+
     Reuse the double gate's limits without loosening: 1 dB, 8/12 deg phase,
     resonance offset (3, 9) Hz and 0.25 dB peak level. Level/phase limits are
     about 1.5-2 times the measured model/mesh gap; the resonance window allows
-    about 3 Hz around the measured offset, and the peak has 0.179 dB headroom.
+    about 3 Hz around the measured offset. Peak headroom is 0.179 dB for
+    velocity and 0.100 dB for acceleration.
     Roundoff needs no extra margin.
     The single sweep took 19.5 s locally in the warmed measurement process.
     """
     frequencies, result = _solve_resonant_pipe_channel(
+        velocity_mode=velocity_mode,
+        velocity_sources={TAG_THROAT: 1.0},
         precision="single",
         adaptive_quadrature=True,
         adaptive_quadrature_kh_min=0.4,
         adaptive_quadrature_kh_max=2.0,
         adaptive_quadrature_low_order=2,
     )
+    assert result.config.velocity_mode is velocity_mode
+    assert result.config.velocity_sources == {TAG_THROAT: 1.0}
     pressure = result.pressure_complex[:, 0, 0]
-    _assert_within_pipe_gate(_pipe_gap(frequencies, pressure, _pipe_reference(frequencies)))
+    reference = _pipe_reference(frequencies)
+    if velocity_mode is VelocityMode.ACCELERATION:
+        omega = 2.0 * np.pi * frequencies
+        reference = reference / (-1j * omega)
+    gap = _pipe_gap(frequencies, pressure, reference)
+    _assert_within_pipe_gate(gap)
