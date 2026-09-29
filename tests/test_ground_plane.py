@@ -198,6 +198,11 @@ def test_observation_below_the_ground_plane_warns(caplog):
 # ---------------------------------------------------------------------------
 
 def _require_bempp_cpu():
+    """OpenCL CPU where there is one, numba otherwise (macOS has no CPU
+    OpenCL device). The checks are about the image/reflection physics, not the
+    assembler, so numba is a sound stand-in and the tests still run locally.
+    """
+    global _ASSEMBLY_BACKEND
     try:
         import bempp_cl.api  # noqa: F401
     except Exception as exc:  # pragma: no cover - depends on env
@@ -206,8 +211,12 @@ def _require_bempp_cpu():
         from hornlab_bempp_bem import configure_opencl
 
         configure_opencl("cpu")
-    except Exception as exc:  # pragma: no cover - depends on env
-        pytest.skip(f"OpenCL CPU runtime unavailable: {exc}")
+        _ASSEMBLY_BACKEND = "opencl"
+    except Exception:  # pragma: no cover - depends on env
+        _ASSEMBLY_BACKEND = "numba"
+
+
+_ASSEMBLY_BACKEND = "opencl"
 
 
 _RADIUS = 0.15
@@ -264,7 +273,7 @@ def _solve_at(mesh, points, **overrides):
         velocity_sources={2: 1.0},
         solver=LinearSolver.LU,
         precision="double",
-        assembly_backend="opencl",
+        assembly_backend=_ASSEMBLY_BACKEND,
         observation=ObservationConfig(
             planes=["horizontal"],
             custom_points={"horizontal": points},

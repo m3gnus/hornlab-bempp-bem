@@ -16,8 +16,8 @@ Covers the new ``_assemble_and_solve_impedance`` code path added
   must raise ``NotImplementedError`` rather than silently dropping one
   of the two.
 
-Tests skip cleanly when bempp-cl or the OpenCL CPU runtime isn't
-available (matches the convention in ``test_reference_asro68.py``).
+Tests skip cleanly when bempp-cl isn't available, and fall back to the
+numba assembler when there is no OpenCL CPU device (macOS).
 """
 from __future__ import annotations
 
@@ -25,8 +25,15 @@ import numpy as np
 import pytest
 
 
-def _require_bempp_cpu() -> None:
-    """Skip if bempp-cl or the OpenCL CPU runtime aren't importable."""
+def _require_bempp_cpu() -> str:
+    """Return the assembly backend to solve with: OpenCL CPU where there is
+    one, numba otherwise.
+
+    macOS has no CPU OpenCL device, so skipping there left these solves
+    unexercised on the machines most development happens on. The assertions
+    are about the Robin branch, not the assembler, so numba is a sound
+    stand-in. Skips only if bempp-cl itself is unavailable.
+    """
     try:
         import bempp_cl.api  # noqa: F401  -- import probe
     except Exception as exc:  # pragma: no cover - depends on env
@@ -36,8 +43,9 @@ def _require_bempp_cpu() -> None:
         from hornlab_bempp_bem import configure_opencl
 
         configure_opencl("cpu")
-    except Exception as exc:  # pragma: no cover - depends on env
-        pytest.skip(f"OpenCL CPU runtime unavailable: {exc}")
+    except Exception:  # pragma: no cover - depends on env
+        return "numba"
+    return "opencl"
 
 
 def _build_small_closed_mesh():
@@ -62,7 +70,7 @@ def _build_small_closed_mesh():
 @pytest.mark.slow
 def test_rigid_recovery_when_beta_is_zero():
     """Robin branch with β = 0 must match the standard branch."""
-    _require_bempp_cpu()
+    backend = _require_bempp_cpu()
 
     from hornlab_bempp_bem.bie import solve_single_frequency
     from hornlab_bempp_bem.config import (
@@ -78,6 +86,7 @@ def test_rigid_recovery_when_beta_is_zero():
         solver=LinearSolver.LU,
         formulation=BIEFormulation.STANDARD,
         precision="double",
+        assembly_backend=backend,
     )
 
     cfg_rigid = SolveConfig(**base_kwargs)
@@ -123,7 +132,7 @@ def test_light_damping_stays_finite_near_eigenvalue():
     We don't try to reproduce the 7.4 dB number here — we just assert
     the damped path is numerically well-behaved.
     """
-    _require_bempp_cpu()
+    backend = _require_bempp_cpu()
 
     from hornlab_bempp_bem.bie import solve_single_frequency
     from hornlab_bempp_bem.config import (
@@ -144,6 +153,7 @@ def test_light_damping_stays_finite_near_eigenvalue():
         solver=LinearSolver.LU,
         formulation=BIEFormulation.STANDARD,
         precision="double",
+        assembly_backend=backend,
     )
     cfg_rigid = SolveConfig(**base_kwargs)
     cfg_damped = SolveConfig(
@@ -190,7 +200,7 @@ def test_bm_plus_impedance_raises():
     code paths..."). We assert the early failure so a future caller
     flipping BM on doesn't silently get a Robin-less solve.
     """
-    _require_bempp_cpu()
+    backend = _require_bempp_cpu()
 
     from hornlab_bempp_bem.bie import solve_single_frequency
     from hornlab_bempp_bem.config import (
@@ -207,6 +217,7 @@ def test_bm_plus_impedance_raises():
         formulation=BIEFormulation.BURTON_MILLER,
         solver=LinearSolver.LU,
         precision="double",
+        assembly_backend=backend,
     )
 
     with pytest.raises(NotImplementedError, match="Robin.*Burton-Miller"):
