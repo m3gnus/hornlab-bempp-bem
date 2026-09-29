@@ -672,18 +672,12 @@ def _assert_within_pipe_gate(gap: dict[str, float]) -> None:
     assert gap["phase_resonance_deg"] < _PIPE_PHASE_TOL_RESONANCE_DEG, gap
 
 
-@pytest.mark.slow
-def test_bempp_coupled_ib_resonant_channel_matches_pipe_reference():
-    """BEMPP alone: resonance frequency, level and phase of the deep channel vs the 1-D pipe.
-
-    Numba CPU assembly, no Metal dependency. Fails on a resonance shifted by about
-    0.5 % or more either way, a 1 dB level error, or an 8 deg phase error, which the
-    shallow-piston tests above cannot see (they use a 4 mm channel).
-    """
+def _solve_resonant_pipe_channel(**config_overrides):
     frequencies = np.unique(np.concatenate([_PIPE_BAND_HZ, _PIPE_RESONANCE_SCAN_HZ]))
     mesh = _channel_mesh(
         _PIPE_RADIUS_M, _PIPE_DEPTH_M, rings=4, sectors=24, wall_layers=10
     )
+    assert mesh.info.n_triangles == 816
     config = _config(
         frame_override=_frame(_PIPE_DEPTH_M),
         formulation="standard",
@@ -694,11 +688,67 @@ def test_bempp_coupled_ib_resonant_channel_matches_pipe_reference():
             angle_max_deg=90.0,
             angle_count=2,
         ),
+        **config_overrides,
     )
     assert config.air_density == pytest.approx(_PIPE_AIR_DENSITY)
     result = bempp_bem.solve_frequencies(mesh, frequencies, config)
+    assert len(result.solver_log) == len(frequencies)
     assert all(
         entry["native_diagnostics"]["coupled_ib"] is True for entry in result.solver_log
+    )
+    assert all(
+        entry["effective_backend"] == "numba"
+        and entry["requested_backend"] == "numba"
+        and entry["effective_precision"] == config.precision
+        and entry["requested_precision"] == config.precision
+        and entry["fallback_used"] is False
+        for entry in result.solver_log
+    )
+    return frequencies, result
+
+
+@pytest.mark.slow
+def test_bempp_coupled_ib_resonant_channel_matches_pipe_reference():
+    """BEMPP alone: resonance frequency, level and phase of the deep channel vs the 1-D pipe.
+
+    Numba CPU assembly, no Metal dependency. Fails on a resonance shifted by about
+    0.5 % or more either way, a 1 dB level error, or an 8 deg phase error, which the
+    shallow-piston tests above cannot see (they use a 4 mm channel).
+    """
+    frequencies, result = _solve_resonant_pipe_channel()
+    pressure = result.pressure_complex[:, 0, 0]
+    _assert_within_pipe_gate(_pipe_gap(frequencies, pressure, _pipe_reference(frequencies)))
+
+
+@pytest.mark.slow
+def test_bempp_coupled_ib_shipped_options_match_pipe_reference():
+    """Gate Waveguide Generator's shipped numba/standard coupled-IB options.
+
+    The single-precision and adaptive settings below match WG's
+    server/solver/bempp.py; its server/requirements-lock.txt pins numba 0.66.0.
+    The coupled-IB implementation currently retains fixed quadrature even when
+    adaptive_quadrature is enabled; this tests the options WG actually passes.
+
+    Measured on the 816-triangle mesh with numba 0.66.0 (35 frequencies),
+    double/fixed vs single/adaptive options respectively: maximum reference
+    level error 0.641861/0.641865 dB, off-resonance phase 4.283728/4.283735 deg,
+    resonant phase 7.986815/7.986855 deg, resonance offset +5.969526/+5.969500 Hz,
+    peak level error -0.071303/-0.071307 dB. Single vs double differs by at most
+    0.00000685 dB / 0.0000892 deg and -0.0000261 Hz at the resonance peak.
+
+    Reuse the double gate's limits without loosening: 1 dB, 8/12 deg phase,
+    resonance offset (3, 9) Hz and 0.25 dB peak level. Level/phase limits are
+    about 1.5-2 times the measured model/mesh gap; the resonance window allows
+    about 3 Hz around the measured offset, and the peak has 0.179 dB headroom.
+    Roundoff needs no extra margin.
+    The single sweep took 19.5 s locally in the warmed measurement process.
+    """
+    frequencies, result = _solve_resonant_pipe_channel(
+        precision="single",
+        adaptive_quadrature=True,
+        adaptive_quadrature_kh_min=0.4,
+        adaptive_quadrature_kh_max=2.0,
+        adaptive_quadrature_low_order=2,
     )
     pressure = result.pressure_complex[:, 0, 0]
     _assert_within_pipe_gate(_pipe_gap(frequencies, pressure, _pipe_reference(frequencies)))
