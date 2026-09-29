@@ -446,9 +446,11 @@ def _metal_engine_or_skip():
         )
     # Freshness guard, equivalent to hornlab-metal-bem's tests/native_helper_guard.py
     # (which is not installed with the package): a helper built from a source tree
-    # that has since changed would validate the previous build. Applies only to the
-    # in-tree swift-package helper; an installed wheel or an explicitly chosen
-    # helper is the caller's responsibility and is not checked.
+    # that has since changed would validate the previous build. Applies to every
+    # swift-package helper, including the one bundled in an installed wheel, which
+    # passes because the installer gives its binary and sources the same extraction
+    # time. A helper chosen explicitly or through the environment variable is the
+    # caller's responsibility and is not checked.
     if status.helper_source == "swift-package":
         helper = status.helper_executable_path
         package_dir = status.native_package_dir
