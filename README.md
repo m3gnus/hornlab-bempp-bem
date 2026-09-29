@@ -97,14 +97,14 @@ from hornlab_bempp_bem import capabilities
 report = capabilities()
 if report["schema_version"] != 1 or report["request_schema_version"] != 1:
     raise RuntimeError("Unsupported solver capability or request schema")
-assert "source_axes" in report["supported_request_fields"]
+assert "source_axes" in report["request_fields"]
 print(report["features"]["ground_plane"]["planes"])  # ['yz', 'xz', 'xy']
 ```
 
 The report is a fresh plain dictionary, serializable with `json.dumps`. It
 includes the package name and installed `package_version` (`None` when no
 distribution metadata is available), every `SolveConfig` constructor field,
-feature values and restrictions, and `conventions.time_dependence` equal to
+feature values and restrictions, and `conventions.time_convention` equal to
 `"exp(-i*omega*t)"`. Fields are derived from the dataclass; formulations and
 backend choices come from their definitions. Symmetry modes, allowed image
 formulations and ground-plane compositions use the solver's config guards.

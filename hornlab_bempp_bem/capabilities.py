@@ -66,8 +66,8 @@ def capabilities() -> dict[str, Any]:
         "request_schema_version": REQUEST_SCHEMA_VERSION,
         "package": "hornlab-bempp-bem",
         "package_version": package_version,
-        "supported_request_fields": request_fields,
-        "conventions": {"time_dependence": "exp(-i*omega*t)"},
+        "request_fields": request_fields,
+        "conventions": {"time_convention": "exp(-i*omega*t)", "outgoing_wave": "exp(+i*k*r)"},
         "features": {
             "source_motion": {
                 "supported": "source_motion" in request_fields,

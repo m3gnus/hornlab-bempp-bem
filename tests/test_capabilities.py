@@ -33,12 +33,12 @@ def test_capabilities_schema_and_json_contract():
     assert report["request_schema_version"] == REQUEST_SCHEMA_VERSION == 1
     assert report["package"] == "hornlab-bempp-bem"
     assert json.loads(json.dumps(report)) == report
-    assert report["conventions"]["time_dependence"] == "exp(-i*omega*t)"
+    assert report["conventions"]["time_convention"] == "exp(-i*omega*t)"
     assert {"capabilities", "CAPABILITY_SCHEMA_VERSION", "REQUEST_SCHEMA_VERSION"} <= set(package.__all__)
 
 
 def test_capabilities_declare_exactly_the_solve_config_fields():
-    declared = capabilities()["supported_request_fields"]
+    declared = capabilities()["request_fields"]
     actual = {item.name for item in fields(SolveConfig) if item.init}
     assert len(declared) == len(set(declared))
     assert set(declared) == actual
@@ -70,7 +70,7 @@ def test_capabilities_without_distribution_metadata(monkeypatch):
 def test_capabilities_is_a_fresh_snapshot():
     expected = capabilities()
     modified = capabilities()
-    modified["supported_request_fields"].clear()
+    modified["request_fields"].clear()
     modified["features"]["ground_plane"]["planes"].clear()
     modified["features"]["ground_plane"]["symmetry_compositions"][0].clear()
     modified["features"]["native_symmetry"]["formulations"].clear()
@@ -100,13 +100,13 @@ def test_capabilities_cover_wg_keyword_and_attribute_probes():
         "source_axes", "on_frequency_result", "return_surface_traces",
         "require_closed_mesh", "workers",
     }
-    assert probed <= set(report["supported_request_fields"])
+    assert probed <= set(report["request_fields"])
     feature_fields = {"infinite_baffle": "aperture_tag", "native_symmetry": "native_symmetry_plane"}
     for feature, detail in report["features"].items():
         if feature == "explicit_frequencies":
             assert callable(getattr(package, detail["entry_point"]))
         else:
-            assert detail["supported"] == (feature_fields.get(feature, feature) in report["supported_request_fields"])
+            assert detail["supported"] == (feature_fields.get(feature, feature) in report["request_fields"])
     assert report["features"]["source_motion"]["values"] == [SourceMotion.NORMAL, SourceMotion.AXIAL]
     assert report["features"]["source_axes"]["requires_source_motion"] == SourceMotion.AXIAL
     assert report["features"]["formulation"]["values"] == [item.value for item in BIEFormulation]
