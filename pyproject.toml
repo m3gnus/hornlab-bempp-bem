@@ -38,8 +38,13 @@ dev = ["pytest", "pyopencl"]
 # packages discovered in a flat-layout: ['runs', 'hornlab_bempp_bem']", while
 # scripts/ had been harmless because setuptools excludes that name by default.
 # Naming the package makes any future top-level directory a non-event.
-[tool.setuptools]
-packages = ["hornlab_bempp_bem"]
+#
+# Naming ONE package silently dropped every subpackage from a built wheel
+# (hornlab_bempp_bem.validation was missing from non-editable installs), so
+# search only inside the package tree: still immune to a stray top-level
+# directory, but every subpackage ships.
+[tool.setuptools.packages.find]
+include = ["hornlab_bempp_bem", "hornlab_bempp_bem.*"]
 
 [tool.pytest.ini_options]
 markers = [
