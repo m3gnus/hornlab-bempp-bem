@@ -89,43 +89,21 @@ order comes from the caller instead of a generated sweep.
 
 ## Capability Handshake
 
-Integrations can inspect package support before constructing a request:
+The shared report contract is specified in
+[docs/capabilities-schema.md](docs/capabilities-schema.md), with a matching
+JSON Schema in both BEM providers. BEAT uses its separate provider schema.
 
 ```python
 from hornlab_bempp_bem import capabilities
 
 report = capabilities()
-if report["schema_version"] != 1 or report["request_schema_version"] != 1:
-    raise RuntimeError("Unsupported solver capability or request schema")
-assert "source_axes" in report["request_fields"]
-print(report["features"]["ground_plane"]["planes"])  # ['yz', 'xz', 'xy']
+assert report["schema"] == "hornlab-bem-capabilities"
+assert report["schema_version"] == report["request_schema_version"] == 1
+assert "axial" in report["features"]["source_motion"]["values"]
 ```
 
-The report is a fresh plain dictionary, serializable with `json.dumps`. It
-includes the package name and installed `package_version` (`None` when no
-distribution metadata is available), every `SolveConfig` constructor field,
-feature values and restrictions, and `conventions.time_convention` equal to
-`"exp(-i*omega*t)"`. Fields are derived from the dataclass; formulations and
-backend choices come from their definitions. Symmetry modes, allowed image
-formulations and ground-plane compositions use the solver's config guards.
-Legacy `"xy"` native symmetry is excluded because the solver rejects it.
-
-Features cover source motion and per-source axes, formulations and complex-k
-shift, frame override, coupled infinite baffle through `aperture_tag`, native
-symmetry, rigid ground planes, explicit frequencies, streamed frequency
-results, retained traces, closed-mesh validation, workers and assembly backends.
-Support for a field does not imply every combination works: image assembly
-and infinite baffle have formulation and Robin restrictions, infinite baffle
-requires a full mesh and cannot retain generic exterior traces, and streamed
-frequency callbacks require a serial sweep.
-
-`CAPABILITY_SCHEMA_VERSION` versions the report shape; feature support changes
-are content changes. `REQUEST_SCHEMA_VERSION` versions the Python `SolveConfig`
-request contract, rather than a wire protocol. Both constants are exported.
-Consumers should check versions before reading fields. This describes package
-support independently of host readiness: it does not load bempp-cl, probe
-OpenCL hardware or run a solve. Use `check_opencl()` or
-`resolve_assembly_backend()` to check this host's runtime.
+Raw public solver output uses `e^{-iωt}` and outgoing `e^{+ikr}`. Feature
+support describes the package API; runtime readiness is checked separately.
 
 ## Configuration
 
