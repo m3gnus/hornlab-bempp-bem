@@ -631,3 +631,8 @@ Numba's on-disk cache path can cross Windows' 260-character `MAX_PATH`, which
 surfaces as a `FileNotFoundError` inside `numba.core.caching` rather than as
 anything resembling a path-length problem. Set `NUMBA_CACHE_DIR` to a short path
 if that happens.
+
+## BEAT compiled inputs (opt-in)
+
+The additive `solve_compiled` API accepts a guarded exterior subset of the official
+BEAT input contract. Legacy APIs remain unchanged. See [input compatibility](docs/BEAT-INPUT-COMPATIBILITY.md) for supported physics, installation and result axes.

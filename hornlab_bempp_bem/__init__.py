@@ -453,3 +453,9 @@ def solve_frequencies(
         config,
         mesh_contracts_validated=True,
     )
+
+
+# Opt-in BEAT compatibility; does not import beat_engine until invoked.
+from .compiled import CompiledResult, compiled_capabilities, solve_compiled
+
+__all__ += ["CompiledResult", "compiled_capabilities", "solve_compiled"]

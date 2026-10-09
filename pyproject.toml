@@ -28,8 +28,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Optional BEAT syntax validator; legacy installs/API never require Julia or BEAT.
+beat-contract = ["beat-engine @ git+https://github.com/m3gnus/BEAT_Engine.git@d7ed50d3da87277bef44419ec9e7401e7d6b1288"]
 opencl = ["pyopencl"]
-dev = ["pytest", "pyopencl"]
+dev = ["pytest", "pyopencl", "hornlab-bempp-bem[beat-contract]"]
 
 # State the package explicitly rather than letting setuptools guess. Flat-layout
 # auto-discovery fails the moment a second top-level directory appears that is
