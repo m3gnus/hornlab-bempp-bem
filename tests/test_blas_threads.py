@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -68,6 +69,45 @@ def test_nested_limits_restore_outer_then_original_counts(libraries):
             assert [lib.threads for lib in libraries] == [1, 1]
         assert [lib.threads for lib in libraries] == [2, 2]
     assert [lib.threads for lib in libraries] == [3, 6]
+
+
+def test_overlapping_threads_restore_original_counts(libraries):
+    started = threading.Event()
+    entered = threading.Event()
+    release = threading.Event()
+    errors = []
+    observed = []
+
+    def second_scope():
+        try:
+            started.set()
+            with blas.limited_blas_threads(2):
+                observed.append([lib.threads for lib in libraries])
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("second BLAS scope was not released")
+        except Exception as error:  # noqa: BLE001 - report failures in the test thread
+            errors.append(error)
+
+    worker = threading.Thread(target=second_scope, daemon=True)
+    try:
+        with blas.limited_blas_threads(1):
+            worker.start()
+            assert started.wait(5)
+            # Keep the second scope open until the first has restored its
+            # counts. It must wait outside the scope while the first owns it.
+            overlapped = entered.wait(0.2)
+        assert entered.wait(5)
+    finally:
+        release.set()
+        if worker.ident is not None:
+            worker.join(5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert observed == [[2, 2]]
+    assert [lib.threads for lib in libraries] == [3, 6]
+    assert not overlapped
 
 
 def test_exception_restores_each_runtime_count(libraries):

@@ -22,11 +22,9 @@ The limiter is best-effort by design: an unrecognised BLAS build, a missing
 symbol, or a load failure leaves the thread count alone rather than failing a
 solve over a performance hint.
 
-The OpenBLAS thread count is process-global, so two threads entering the block
-concurrently would fight over it and the second to leave would win. That is
-acceptable here: bempp-cl's assemblers are serial within a process and the
-parallel sweep uses processes, not threads. Nothing is corrupted either way --
-the worst case is a solve running with the wrong number of threads.
+The OpenBLAS thread count is process-global, so scopes in different threads
+must serialize the save/set/restore sequence. A reentrant lock also permits
+nested scopes in the same thread, each restoring its caller's thread count.
 """
 from __future__ import annotations
 
@@ -49,7 +47,7 @@ _CANDIDATES = (
     ("numpy", ".libs", "openblas_set_num_threads"),
 )
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 # Each entry pairs one library's setter with its matching runtime getter.
 _setters: list[tuple] | None = None
 
@@ -107,30 +105,32 @@ def limited_blas_threads(threads: int = 1):
     Restores the previous count on exit, including on exception. A no-op when
     no paired setter/getter is available or ``threads`` is not positive.
     Each library's current runtime count is saved separately, so nested scopes
-    and budgets set by an embedding application are preserved.
+    and budgets set by an embedding application are preserved. Scopes in
+    different threads serialize through restoration.
     """
     setters = _get_setters()
     if not setters or threads <= 0:
         yield
         return
 
-    previous = []
-    for setter, getter in setters:
-        try:
-            count = int(getter())
-            if count <= 0:
-                continue
-            # Even a setter that raises after changing the count needs a
-            # restoration attempt. A failed getter leaves the library alone.
-            previous.append((setter, count))
-            setter(int(threads))
-        except Exception:  # pragma: no cover - defensive
-            pass
-    try:
-        yield
-    finally:
-        for setter, count in reversed(previous):
+    with _lock:
+        previous = []
+        for setter, getter in setters:
             try:
-                setter(count)
+                count = int(getter())
+                if count <= 0:
+                    continue
+                # Even a setter that raises after changing the count needs a
+                # restoration attempt. A failed getter leaves the library alone.
+                previous.append((setter, count))
+                setter(int(threads))
             except Exception:  # pragma: no cover - defensive
                 pass
+        try:
+            yield
+        finally:
+            for setter, count in reversed(previous):
+                try:
+                    setter(count)
+                except Exception:  # pragma: no cover - defensive
+                    pass
