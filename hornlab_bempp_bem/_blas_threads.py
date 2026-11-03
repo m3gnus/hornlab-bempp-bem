@@ -14,9 +14,9 @@ would pay for the solve by taxing every other array operation in it, including
 the symmetry reduction's own dense product and anything else sharing the
 interpreter.
 
-NumPy and SciPy each bundle their own OpenBLAS, and both export a runtime
-thread setter, so the limit can be scoped to the factorization instead of being
-fixed for the process at import time.
+NumPy and SciPy each bundle their own OpenBLAS, and both export runtime
+thread setters and getters, so the limit can be scoped to the factorization
+instead of being fixed for the process at import time.
 
 The limiter is best-effort by design: an unrecognised BLAS build, a missing
 symbol, or a load failure leaves the thread count alone rather than failing a
@@ -50,11 +50,12 @@ _CANDIDATES = (
 )
 
 _lock = threading.Lock()
-_setters: list | None = None
+# Each entry pairs one library's setter with its matching runtime getter.
+_setters: list[tuple] | None = None
 
 
 def _discover_setters() -> list:
-    """Find every bundled OpenBLAS thread setter we can reach. Never raises."""
+    """Find paired OpenBLAS thread setters and getters. Never raises."""
     setters = []
     seen: set[str] = set()
     for module_name, libdir, symbol in _CANDIDATES:
@@ -66,16 +67,23 @@ def _discover_setters() -> list:
                 if path in seen:
                     continue
                 try:
-                    setter = getattr(ctypes.CDLL(path), symbol)
+                    library = ctypes.CDLL(path)
+                    setter = getattr(library, symbol)
+                    getter = getattr(
+                        library, symbol.replace("_set_num_threads", "_get_num_threads"),
+                    )
                 except (OSError, AttributeError):
                     continue
                 setter.argtypes = [ctypes.c_int]
-                setters.append(setter)
+                setter.restype = None
+                getter.argtypes = []
+                getter.restype = ctypes.c_int
+                setters.append((setter, getter))
                 seen.add(path)
         except Exception:  # pragma: no cover - defensive
             continue
     if not setters:
-        logger.debug("no bundled OpenBLAS thread setter found; not limiting")
+        logger.debug("no paired OpenBLAS thread setter/getter found; not limiting")
     return setters
 
 
@@ -97,41 +105,32 @@ def limited_blas_threads(threads: int = 1):
     """Restrict BLAS to ``threads`` for the duration of the block.
 
     Restores the previous count on exit, including on exception. A no-op when
-    no setter is available or ``threads`` is not positive.
-
-    OpenBLAS exposes no portable *getter* across both bundled builds, so the
-    previous value is taken from the environment, defaulting to the CPU count
-    -- which is what OpenBLAS itself defaults to.
+    no paired setter/getter is available or ``threads`` is not positive.
+    Each library's current runtime count is saved separately, so nested scopes
+    and budgets set by an embedding application are preserved.
     """
     setters = _get_setters()
     if not setters or threads <= 0:
         yield
         return
 
-    previous = _ambient_thread_count()
-    for setter in setters:
+    previous = []
+    for setter, getter in setters:
         try:
+            count = int(getter())
+            if count <= 0:
+                continue
+            # Even a setter that raises after changing the count needs a
+            # restoration attempt. A failed getter leaves the library alone.
+            previous.append((setter, count))
             setter(int(threads))
         except Exception:  # pragma: no cover - defensive
             pass
     try:
         yield
     finally:
-        for setter in setters:
+        for setter, count in reversed(previous):
             try:
-                setter(int(previous))
+                setter(count)
             except Exception:  # pragma: no cover - defensive
                 pass
-
-
-def _ambient_thread_count() -> int:
-    for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS"):
-        value = os.environ.get(name)
-        if value:
-            try:
-                parsed = int(value)
-            except ValueError:
-                continue
-            if parsed > 0:
-                return parsed
-    return os.cpu_count() or 1

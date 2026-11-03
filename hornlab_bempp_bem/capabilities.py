@@ -89,6 +89,11 @@ def capabilities() -> dict[str, Any]:
     r = _refusal
     ib_refusals = [
         r(
+            "ib_ground",
+            "Coupled infinite baffle refuses ground-plane images.",
+            "ground_plane",
+        ),
+        r(
             "ib_burton_miller",
             "Coupled infinite baffle refuses Burton-Miller.",
             "formulation",
@@ -132,6 +137,11 @@ def capabilities() -> dict[str, Any]:
         ),
     ]
     ground_refusals = [
+        r(
+            "ground_infinite_baffle",
+            "Ground images refuse coupled infinite baffle.",
+            "aperture_tag",
+        ),
         r("ground_burton_miller", "Ground images refuse Burton-Miller.", "formulation"),
         r(
             "ground_robin",

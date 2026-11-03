@@ -309,6 +309,9 @@ def solve_channel_basis(
     complex multiply-add per point instead of a sweep. The price is one sweep
     per channel up front; ``solve()`` with the same ``channels`` set is a
     single sweep and gives the same synthesized answer for one fixed crossover.
+
+    Coupled infinite-baffle meshes are unsupported here; use
+    :func:`solve_frequencies` for a coupled solve instead.
     """
     if config is None:
         config = SolveConfig()
@@ -326,7 +329,14 @@ def solve_channel_basis(
             config.require_closed_mesh and not uses_image_assembly(config)
         ),
         native_symmetry_plane=config.native_symmetry_plane,
+        aperture_tag=config.aperture_tag,
     )
+    config = _resolve_coupled_ib_config(loaded, config)
+    if config.aperture_tag is not None:
+        raise NotImplementedError(
+            "solve_channel_basis does not support coupled infinite-baffle "
+            "meshes. Use solve_frequencies() or solve() for a coupled solve."
+        )
     _validate_velocity_source_tags(loaded.physical_tags, config.velocity_sources)
     # One frame for every channel: resolved from the full source set, before
     # any channel restriction can move ``min(velocity_sources)`` and with it

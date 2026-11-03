@@ -1,103 +1,155 @@
-"""Scoped BLAS thread limiting must be safe, reversible, and never fatal."""
+"""Scoped BLAS thread limiting must restore each library's runtime budget."""
+
 from __future__ import annotations
 
-import os
+import ctypes
+from types import SimpleNamespace
 
 import pytest
 
-from hornlab_bempp_bem import _blas_threads
-from hornlab_bempp_bem._blas_threads import (
-    _ambient_thread_count,
-    blas_thread_control_available,
-    limited_blas_threads,
-)
+from hornlab_bempp_bem import _blas_threads as blas
 
 
-class _RecordingSetter:
-    def __init__(self):
-        self.calls = []
+class _Function:
+    def __init__(self, function):
+        self.function = function
         self.argtypes = None
+        self.restype = None
 
-    def __call__(self, value):
-        self.calls.append(int(value))
+    def __call__(self, *args):
+        return self.function(*args)
+
+
+class _Library:
+    def __init__(self, threads, symbol):
+        self.threads = threads
+        self.calls = []
+        self.setter = _Function(self.set_threads)
+        self.getter = _Function(lambda: self.threads)
+        self.symbol = symbol
+        self.get_symbol = symbol.replace("_set_num_threads", "_get_num_threads")
+        setattr(self, symbol, self.setter)
+        setattr(self, self.get_symbol, self.getter)
+
+    def set_threads(self, value):
+        self.calls.append(value)
+        self.threads = value
 
 
 @pytest.fixture
-def recording(monkeypatch):
-    setter = _RecordingSetter()
-    monkeypatch.setattr(_blas_threads, "_setters", [setter])
-    return setter
+def libraries(monkeypatch):
+    # Exercise the real discovery path, with separate NumPy and SciPy BLASes.
+    candidates = blas._CANDIDATES[:2]
+    libs = [_Library(n, row[2]) for n, row in zip((3, 6), candidates)]
+    paths = {f"{row[1]}/openblas.so": lib for row, lib in zip(candidates, libs)}
+    monkeypatch.setattr(blas, "_CANDIDATES", candidates)
+    monkeypatch.setattr(blas, "_setters", None)
+    monkeypatch.setattr(blas.ctypes, "CDLL", paths.__getitem__)
 
+    def discover(pattern):
+        if not pattern.endswith(".so*"):
+            return []
+        return [path for path in paths if path.split("/")[0] in pattern]
 
-def test_limit_is_applied_and_restored(recording, monkeypatch):
+    monkeypatch.setattr(blas.glob, "glob", discover)
     monkeypatch.setenv("OPENBLAS_NUM_THREADS", "8")
-
-    with limited_blas_threads(1):
-        assert recording.calls == [1]
-
-    assert recording.calls == [1, 8]
+    return libs
 
 
-def test_limit_is_restored_after_an_exception(recording, monkeypatch):
-    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "6")
-
-    with pytest.raises(RuntimeError):
-        with limited_blas_threads(1):
-            raise RuntimeError("solve blew up")
-
-    assert recording.calls == [1, 6], "the limit must not leak out of the block"
+def test_each_library_restores_its_runtime_count(libraries):
+    with blas.limited_blas_threads(1):
+        assert [lib.threads for lib in libraries] == [1, 1]
+    assert [lib.threads for lib in libraries] == [3, 6]
 
 
-def test_non_positive_thread_counts_are_a_no_op(recording):
-    with limited_blas_threads(0):
+def test_nested_limits_restore_outer_then_original_counts(libraries):
+    with blas.limited_blas_threads(2):
+        with blas.limited_blas_threads(1):
+            assert [lib.threads for lib in libraries] == [1, 1]
+        assert [lib.threads for lib in libraries] == [2, 2]
+    assert [lib.threads for lib in libraries] == [3, 6]
+
+
+def test_exception_restores_each_runtime_count(libraries):
+    with (
+        pytest.raises(RuntimeError, match="solve blew up"),
+        blas.limited_blas_threads(1),
+    ):
+        raise RuntimeError("solve blew up")
+    assert [lib.threads for lib in libraries] == [3, 6]
+
+
+def test_non_positive_thread_counts_are_a_no_op(libraries):
+    for count in (0, -1):
+        with blas.limited_blas_threads(count):
+            pass
+    assert all(lib.calls == [] for lib in libraries)
+
+
+def test_missing_getter_leaves_library_untouched(libraries):
+    lib = libraries[0]
+    delattr(lib, lib.get_symbol)
+    with blas.limited_blas_threads(1):
+        assert lib.threads == 3
+        assert libraries[1].threads == 1
+    assert lib.calls == []
+
+
+@pytest.mark.parametrize("count", [0, -1, None])
+def test_unusable_runtime_count_leaves_library_untouched(libraries, count):
+    libraries[0].getter.function = lambda: count
+    with blas.limited_blas_threads(1):
+        assert libraries[0].threads == 3
+    assert libraries[0].calls == []
+
+
+def test_failing_getter_leaves_library_untouched(libraries):
+    def fail():
+        raise OSError("getter failed")
+
+    libraries[0].getter.function = fail
+    with blas.limited_blas_threads(1):
+        assert libraries[0].threads == 3
+    assert libraries[0].calls == []
+
+
+def test_failing_setter_still_attempts_restoration(libraries):
+    lib = libraries[0]
+
+    def fail_after_setting(value):
+        lib.set_threads(value)
+        raise OSError("setter failed")
+
+    lib.setter.function = fail_after_setting
+    with blas.limited_blas_threads(1):
+        assert libraries[1].threads == 1
+    assert [lib.threads for lib in libraries] == [3, 6]
+
+
+@pytest.mark.parametrize("candidate", blas._CANDIDATES)
+def test_discovery_pairs_matching_getter_with_setter(monkeypatch, candidate):
+    lib = _Library(3, candidate[2])
+    monkeypatch.setattr(blas, "_CANDIDATES", [candidate])
+    monkeypatch.setattr(blas, "_setters", None)
+    monkeypatch.setattr(blas.ctypes, "CDLL", lambda path: lib)
+    monkeypatch.setattr(blas.glob, "glob", lambda pattern: ["openblas.so"])
+    with blas.limited_blas_threads(1):
+        assert lib.threads == 1
+    assert lib.threads == 3
+    assert lib.setter.argtypes == [ctypes.c_int]
+    assert lib.setter.restype is None
+    assert lib.getter.argtypes == []
+    assert lib.getter.restype is ctypes.c_int
+
+
+def test_missing_symbols_are_a_no_op(monkeypatch):
+    monkeypatch.setattr(blas, "_setters", None)
+    monkeypatch.setattr(blas.ctypes, "CDLL", lambda path: SimpleNamespace())
+    monkeypatch.setattr(blas.glob, "glob", lambda pattern: ["openblas.so"])
+    assert not blas.blas_thread_control_available()
+    with blas.limited_blas_threads(1):
         pass
-    with limited_blas_threads(-1):
-        pass
-
-    assert recording.calls == []
-
-
-def test_a_failing_setter_does_not_break_the_solve(monkeypatch):
-    def explode(_value):
-        raise OSError("vendor library went away")
-
-    monkeypatch.setattr(_blas_threads, "_setters", [explode])
-
-    with limited_blas_threads(1):
-        pass  # must simply not raise
-
-
-def test_missing_setters_are_a_no_op(monkeypatch):
-    monkeypatch.setattr(_blas_threads, "_setters", [])
-
-    with limited_blas_threads(1):
-        pass
-
-
-def test_ambient_count_prefers_the_environment(monkeypatch):
-    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "3")
-    assert _ambient_thread_count() == 3
-
-    monkeypatch.delenv("OPENBLAS_NUM_THREADS")
-    monkeypatch.setenv("OMP_NUM_THREADS", "5")
-    assert _ambient_thread_count() == 5
-
-
-def test_ambient_count_falls_back_to_the_cpu_count(monkeypatch):
-    monkeypatch.delenv("OPENBLAS_NUM_THREADS", raising=False)
-    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
-
-    assert _ambient_thread_count() == (os.cpu_count() or 1)
-
-
-@pytest.mark.parametrize("value", ["", "0", "-2", "not-a-number"])
-def test_unusable_environment_values_fall_back(monkeypatch, value):
-    monkeypatch.setenv("OPENBLAS_NUM_THREADS", value)
-    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
-
-    assert _ambient_thread_count() == (os.cpu_count() or 1)
 
 
 def test_discovery_reports_what_this_install_can_do():
-    """Not an assertion about the host; it must simply answer without raising."""
-    assert isinstance(blas_thread_control_available(), bool)
+    assert isinstance(blas.blas_thread_control_available(), bool)

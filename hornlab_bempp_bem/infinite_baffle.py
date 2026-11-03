@@ -68,6 +68,11 @@ def _validate_coupled_infinite_baffle(
             "BEMPP coupled infinite-baffle currently requires the full-domain "
             "mesh; use Metal BEM for native half/quarter image symmetry"
         )
+    if config.ground_plane is not None:
+        raise NotImplementedError(
+            "BEMPP coupled infinite-baffle does not support ground_plane "
+            "images. Remove ground_plane to solve without a ground reflection."
+        )
     if config.formulation is BIEFormulation.BURTON_MILLER:
         raise NotImplementedError(
             "BEMPP coupled infinite-baffle supports STANDARD and COMPLEX_K; "

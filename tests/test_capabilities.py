@@ -156,6 +156,21 @@ def case(
 
 
 CASES = [
+    *[
+        case(
+            feature,
+            identifier,
+            related,
+            {"aperture_tag": 3, "ground_plane": plane},
+            ib_guard,
+            match="ground_plane",
+        )
+        for feature, identifier, related in (
+            ("infinite_baffle", "ib_ground", ["ground_plane"]),
+            ("ground_plane", "ground_infinite_baffle", ["aperture_tag"]),
+        )
+        for plane in ("xy", "yz", "xz")
+    ],
     case(
         "infinite_baffle",
         "ib_burton_miller",

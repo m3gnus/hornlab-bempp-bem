@@ -64,8 +64,18 @@ def _solver_log_entry(fr: FrequencyResult) -> dict:
     return entry
 
 
+def _surface_trace_coefficients(fr: FrequencyResult) -> tuple[
+    NDArray[np.complex128], NDArray[np.complex128],
+]:
+    """Keep solve-space coefficients without keeping GridFunctions or images."""
+    return (
+        np.asarray(fr.pressure_on_surface.coefficients, dtype=np.complex128),
+        np.asarray(fr.neumann_data.coefficients, dtype=np.complex128),
+    )
+
+
 def _retained_surface_traces(
-    freq_results: list[FrequencyResult],
+    trace_rows: list[tuple[NDArray[np.complex128], NDArray[np.complex128]]],
     enabled: bool,
 ) -> tuple[
     NDArray[np.complex128] | None,
@@ -74,20 +84,8 @@ def _retained_surface_traces(
     """Stack solve-space P1 pressure and total DP0 Neumann coefficients."""
     if not enabled:
         return None, None
-    pressure = np.stack(
-        [
-            np.asarray(fr.pressure_on_surface.coefficients, dtype=np.complex128)
-            for fr in freq_results
-        ],
-        axis=0,
-    )
-    neumann = np.stack(
-        [
-            np.asarray(fr.neumann_data.coefficients, dtype=np.complex128)
-            for fr in freq_results
-        ],
-        axis=0,
-    )
+    pressure = np.stack([row[0] for row in trace_rows], axis=0)
+    neumann = np.stack([row[1] for row in trace_rows], axis=0)
     return pressure, neumann
 
 
@@ -389,6 +387,9 @@ def run_sweep_serial(
             native_symmetry_plane=config.native_symmetry_plane,
         )
     freq_results: list[FrequencyResult] = []
+    impedances: list[complex] = []
+    solver_log: list[dict] = []
+    trace_rows = []
     surface_pavg: dict[int, list[complex]] = {tag: [] for tag in source_tags}
     backend_fallback_warned = False
 
@@ -414,7 +415,12 @@ def run_sweep_serial(
             closed_mesh_validated=True,
             symmetry_context=symmetry_context,
         )
-        freq_results.append(fr)
+        if not has_callback:
+            # Deferred observation evaluation still needs the full traces.
+            freq_results.append(fr)
+        elif config.return_surface_traces:
+            trace_rows.append(_surface_trace_coefficients(fr))
+        impedances.append(fr.impedance)
 
         # Surface pressure average per source tag
         pavg = compute_surface_pressure_avg(
@@ -424,6 +430,10 @@ def run_sweep_serial(
         for tag in source_tags:
             surface_pavg[tag].append(pavg[tag])
 
+        log_entry = _solver_log_entry(fr)
+        solver_log.append(log_entry)
+        # Callers may mutate their callback diagnostics. Keep the final log
+        # independent, as it was when rebuilt from FrequencyResults at exit.
         log_entry = _solver_log_entry(fr)
         log_entry["impedance"] = fr.impedance
         if log_entry["fallback_used"] and not backend_fallback_warned:
@@ -474,7 +484,11 @@ def run_sweep_serial(
 
         # Early-stopping callback
         if has_callback:
-            if config.on_frequency_result(i, float(freq), log_entry) is False:
+            keep_going = config.on_frequency_result(i, float(freq), log_entry)
+            # Release both solve-space and expanded-field GridFunctions before
+            # the next solve allocates its working traces, including on stop.
+            del field_pressure, field_neumann, fr
+            if keep_going is False:
                 logger.info("Early stop requested after %.1f Hz", freq)
                 break
 
@@ -499,24 +513,22 @@ def run_sweep_serial(
         )
         t_dir = time.time() - t_dir
 
-    impedance = np.array(
-        [fr.impedance for fr in freq_results], dtype=np.complex128,
-    )
-
-    solver_log = [_solver_log_entry(fr) for fr in freq_results]
+    impedance = np.array(impedances, dtype=np.complex128)
 
     # Build surface_pressure_avg arrays
     sp_avg: dict[int, np.ndarray] = {}
     for tag in source_tags:
         sp_avg[tag] = np.array(surface_pavg[tag], dtype=np.complex128)
 
+    if not has_callback and config.return_surface_traces:
+        trace_rows = [_surface_trace_coefficients(fr) for fr in freq_results]
     surface_pressure_traces, surface_neumann_traces = _retained_surface_traces(
-        freq_results, config.return_surface_traces,
+        trace_rows, config.return_surface_traces,
     )
 
     return SolveResult(
         frequencies_hz=np.array(
-            frequencies[:len(freq_results)], dtype=np.float64,
+            frequencies[:len(impedances)], dtype=np.float64,
         ),
         pressure_complex=pressure,
         spl_db=spl,
@@ -916,8 +928,7 @@ def _worker_solve_chunk_inner(
         for tag in source_tags
     }
     log_entries = []
-    pressure_trace_rows = [] if config.return_surface_traces else None
-    neumann_trace_rows = [] if config.return_surface_traces else None
+    trace_rows = []
 
     # On-axis index: the angle closest to 0 degrees
     on_axis_idx = int(np.argmin(np.abs(angles_deg)))
@@ -949,16 +960,8 @@ def _worker_solve_chunk_inner(
         for tag in source_tags:
             surface_pressure[tag][i] = pavg[tag]
         log_entries.append(_solver_log_entry(fr))
-        if pressure_trace_rows is not None and neumann_trace_rows is not None:
-            pressure_trace_rows.append(
-                np.asarray(
-                    fr.pressure_on_surface.coefficients,
-                    dtype=np.complex128,
-                )
-            )
-            neumann_trace_rows.append(
-                np.asarray(fr.neumann_data.coefficients, dtype=np.complex128)
-            )
+        if config.return_surface_traces:
+            trace_rows.append(_surface_trace_coefficients(fr))
 
         k_real = 2.0 * np.pi * freq / SPEED_OF_SOUND
         field_pressure = (
@@ -1005,10 +1008,9 @@ def _worker_solve_chunk_inner(
         surface_pressure,
         sphere_pressure,
     )
-    if pressure_trace_rows is None or neumann_trace_rows is None:
+    if not config.return_surface_traces:
         return result
     return (
         *result,
-        np.stack(pressure_trace_rows, axis=0),
-        np.stack(neumann_trace_rows, axis=0),
+        *_retained_surface_traces(trace_rows, True),
     )

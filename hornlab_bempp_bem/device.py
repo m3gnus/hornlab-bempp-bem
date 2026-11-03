@@ -97,9 +97,6 @@ def configure_opencl(device_type: str = "cpu") -> str:
     enable_singular_workgroup_tuning()
 
     try:
-        setattr(bempp_api, "BOUNDARY_OPERATOR_DEVICE_TYPE", normalized)
-        setattr(bempp_api, "POTENTIAL_OPERATOR_DEVICE_TYPE", normalized)
-
         if normalized == "cpu":
             device = opencl_kernels.default_cpu_device()
             opencl_kernels.default_cpu_context()
@@ -122,6 +119,10 @@ def configure_opencl(device_type: str = "cpu") -> str:
         # could not be served anyway, but dropping them frees the old contexts.
         clear_opencl_program_cache()
 
+    # Publish the selection only after every required context is usable. A
+    # failed switch must leave the globals consistent with the cached device.
+    bempp_api.BOUNDARY_OPERATOR_DEVICE_TYPE = normalized
+    bempp_api.POTENTIAL_OPERATOR_DEVICE_TYPE = normalized
     _active_device_type = normalized
     _active_device_name = str(
         getattr(device, "name", None) or f"OpenCL {normalized.upper()}"
