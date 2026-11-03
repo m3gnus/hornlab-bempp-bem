@@ -187,10 +187,17 @@ def _normalized_spl_db(
     pressure: NDArray[np.complex128],
     on_axis_idx: int,
 ) -> NDArray[np.float64]:
-    """Convert pressure to SPL and normalize its last axis to zero on-axis."""
+    """Normalize SPL on the last axis, leaving invalid samples unavailable.
+
+    A nonfinite reference invalidates its whole row. Retain the established
+    finite-pressure levels here; changing the silent-point floor requires a
+    separate numerical compatibility decision.
+    """
     amplitudes = np.abs(pressure)
-    spl_raw = np.full(amplitudes.shape, -120.0, dtype=np.float64)
-    audible = amplitudes > 1e-15
+    finite = np.isfinite(pressure) & np.isfinite(amplitudes)
+    spl_raw = np.full(amplitudes.shape, np.nan, dtype=np.float64)
+    spl_raw[finite] = -120.0
+    audible = finite & (amplitudes > 1e-15)
     spl_raw[audible] = 20.0 * np.log10(
         amplitudes[audible] / REFERENCE_PRESSURE
     )

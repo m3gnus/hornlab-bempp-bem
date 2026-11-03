@@ -111,6 +111,29 @@ def _standard_sweep_patches():
 
 class TestOnAxisIndex:
 
+    @pytest.mark.parametrize("invalid", [complex(np.nan, 0.0), complex(np.inf, 0.0), complex(0.0, -np.inf)])
+    def test_spl_normalisation_preserves_invalid_offaxis_samples(self, invalid):
+        from hornlab_bempp_bem.sweep import _normalized_spl_db
+
+        pressure = np.array([[1.0, invalid, 0.5]], dtype=complex)
+        with np.errstate(divide="raise", invalid="raise"):
+            spl = _normalized_spl_db(pressure, on_axis_idx=0)
+
+        assert spl[0, 0] == 0.0
+        assert np.isnan(spl[0, 1])
+        assert spl[0, 2] == pytest.approx(-6.020599913279625)
+
+    @pytest.mark.parametrize("invalid", [complex(np.nan, 0.0), complex(np.inf, 0.0)])
+    def test_spl_normalisation_marks_invalid_reference_row_unavailable(self, invalid):
+        from hornlab_bempp_bem.sweep import _normalized_spl_db
+
+        pressure = np.array([[invalid, 1.0], [invalid, invalid], [1.0, 0.5]], dtype=complex)
+        with np.errstate(divide="raise", invalid="raise"):
+            spl = _normalized_spl_db(pressure, on_axis_idx=0)
+
+        assert np.all(np.isnan(spl[:2]))
+        np.testing.assert_allclose(spl[2], [0.0, -6.020599913279625])
+
     def test_spl_normalisation_handles_silent_points_without_log_warning(self):
         from hornlab_bempp_bem._constants import REFERENCE_PRESSURE
         from hornlab_bempp_bem.sweep import _normalized_spl_db
