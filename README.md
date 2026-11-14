@@ -27,7 +27,7 @@ The package does not import `gmsh` at runtime; meshes are read through
   backends, outputs, install and tests.
 - [Capability report schema](docs/capabilities-schema.md), shared with
   `hornlab-metal-bem`, which carries an identical copy.
-- [BEAT compiled inputs](docs/BEAT-INPUT-COMPATIBILITY.md): the opt-in adapter for
+- [BEAT compiled inputs](docs/beat-input-compatibility.md): the opt-in adapter for
   the official BEAT solve-request envelope.
 - Measurement reports, each next to its raw data and scripts:
   [B0, Numba vs OpenCL assembly on Windows](runs/260901-windows-b0/REPORT.md),
@@ -648,4 +648,4 @@ if that happens.
 ## BEAT compiled inputs (opt-in)
 
 The additive `solve_compiled` API accepts a guarded exterior subset of the official
-BEAT input contract. Legacy APIs remain unchanged. See [input compatibility](docs/BEAT-INPUT-COMPATIBILITY.md) for supported physics, installation and result axes.
+BEAT input contract. Legacy APIs remain unchanged. See [input compatibility](docs/beat-input-compatibility.md) for supported physics, installation and result axes.
