@@ -21,6 +21,19 @@ models, and serial or parallel frequency sweeps.
 The package does not import `gmsh` at runtime; meshes are read through
 `meshio`.
 
+## Documentation
+
+- This README: usage, configuration, symmetry, ground plane, formulations,
+  backends, outputs, install and tests.
+- [Capability report schema](docs/capabilities-schema.md), shared with
+  `hornlab-metal-bem`, which carries an identical copy.
+- [BEAT compiled inputs](docs/BEAT-INPUT-COMPATIBILITY.md): the opt-in adapter for
+  the official BEAT solve-request envelope.
+- Measurement reports, each next to its raw data and scripts:
+  [B0, Numba vs OpenCL assembly on Windows](runs/260901-windows-b0/REPORT.md),
+  [B6, BEAT CPU against bempp-OpenCL](runs/260901-windows-b6/REPORT.md),
+  [PoCL on Windows](runs/260902-windows-pocl/REPORT.md).
+
 ## Quick Start
 
 Run a solve from a Gmsh `.msh` file with canonical physical tags:
