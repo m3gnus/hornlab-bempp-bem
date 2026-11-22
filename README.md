@@ -29,10 +29,9 @@ The package does not import `gmsh` at runtime; meshes are read through
   `hornlab-metal-bem`, which carries an identical copy.
 - [BEAT compiled inputs](docs/beat-input-compatibility.md): the opt-in adapter for
   the official BEAT solve-request envelope.
-- Measurement reports, each next to its raw data and scripts:
-  [B0, Numba vs OpenCL assembly on Windows](runs/260901-windows-b0/REPORT.md),
-  [B6, BEAT CPU against bempp-OpenCL](runs/260901-windows-b6/REPORT.md),
-  [PoCL on Windows](runs/260902-windows-pocl/REPORT.md).
+- Measurement reports (B0, Numba vs OpenCL assembly on Windows; B6, BEAT CPU
+  against bempp-OpenCL; PoCL on Windows), with their raw data and scripts, are in
+  this repository's history under `runs/` up to commit `fe67b15`.
 
 ## Quick Start
 
@@ -488,8 +487,8 @@ the reason.
 
 Falling back is not cheap, and on a stock install it is quiet. Measured on a
 12-vCPU AVX2 Windows box against a three-rung ASRO68 ladder at 2 kHz, warm
-assembly per frequency (`runs/260901-windows-b0/` carries the raw JSON and the
-benchmark script):
+assembly per frequency (the raw JSON and the benchmark script are in the history
+under `runs/260901-windows-b0/` up to commit `fe67b15`):
 
 Double precision:
 
